@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoclicker"
+version = "0.1.0"
+description = "Desktop watcher that auto-approves Claude Code bash prompts after an LLM safety check"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Sebastien Michea" }]
+license = { text = "MIT" }
+dependencies = [
+    "mss>=9.0.1",
+    "rapidocr-onnxruntime>=1.3.24",
+    "pyautogui>=0.9.54",
+    "pynput>=1.7.7",
+    "pystray>=0.19.5",
+    "Pillow>=10.2",
+    "openai>=1.40",
+    "pydantic>=2.6",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pyinstaller>=6.6",
+]
+
+[project.scripts]
+autoclicker = "autoclicker.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+autoclicker = ["assets/*.ico", "assets/*.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,2 +1,95 @@
 # autoclicker
-autoclick the claude code/codex yes/no questions
+
+Desktop watcher that auto-approves Claude Code's `Allow this bash command?` prompts — **only after** an OpenAI safety check confirms the command is non-destructive.
+
+## How it works
+
+1. Every ~750 ms, captures each monitored **region** (or full screens if none configured).
+2. Runs OCR (RapidOCR — pure ONNX, no Tesseract needed).
+3. Detects the Claude Code prompt by looking for the `Allow this bash command?` header together with `1 Yes` / `2 No` option lines. Frames without all markers are ignored.
+4. Extracts the command text between the header and the options.
+5. Sends it to OpenAI `gpt-5.4-nano-2026-03-17` with a Structured-Outputs schema asking for `{safe, category, reason}`.
+6. If the verdict is `safe: true` **and** the app is armed, moves the mouse to the Yes button's pixel coords and clicks. Otherwise logs the decision and moves on.
+
+The classifier fails **closed** on API errors or an uncertain verdict → no click. If `OPENAI_API_KEY` isn't set at all, the AI check is skipped and detections proceed as if safe (startup log prints `ai_check=OFF`).
+
+## Monitored regions
+
+Full-screen OCR on a 2K/4K display is the slow path. Defining one or more ROIs over your Claude Code pane is **10-20× faster** and eliminates most false positives. Two ways to set them:
+
+- **Tray menu → "Set monitored regions"**: fullscreen translucent overlay appears per monitor. Drag to add rectangles, right-click to remove the last one, Enter to save, Esc to cancel.
+- **CLI**: `python -m autoclicker --pick` (or `autoclicker --pick` for the exe) runs just the picker and exits.
+- Clear them with `autoclicker --clear-regions` (falls back to full-screen scan).
+
+Regions are saved in `config.json` and persist across launches. Move/resize your terminal? Just rerun the picker.
+
+## First launch is dry-run
+
+By design. The tray icon starts as a grey circle (`DRY-RUN`). Detections are logged, nothing is clicked. Once you've watched the log and trust the detection, right-click the tray icon and pick **Arm auto-click** (green circle).
+
+## Install — end user (exe)
+
+Download `autoclicker.exe` from the [GitHub Actions artifacts](../../actions) or the latest release, set `OPENAI_API_KEY` in your environment, then double-click. No Python needed.
+
+## Install — from source
+
+```pwsh
+pip install -e .[dev]
+python -m autoclicker           # dry-run, tray in grey
+python -m autoclicker --armed   # arm on start (still cooldown-gated)
+```
+
+## Configuration
+
+Config lives at `%APPDATA%\autoclicker\config.json` (Windows) or `~/.config/autoclicker/config.json` (Linux/macOS). Any field may be omitted; defaults are used.
+
+```json
+{
+  "openai_api_key": null,
+  "model": "gpt-5.4-nano-2026-03-17",
+  "model_fallback": "gpt-5.4-nano",
+  "poll_interval_ms": 750,
+  "armed_on_start": false,
+  "click_cooldown_s": 2.0,
+  "dedup_window_s": 5.0,
+  "user_activity_radius_px": 50,
+  "openai_timeout_s": 4.0,
+  "log_level": "INFO",
+  "regions": [
+    { "monitor_index": 1, "x": 100, "y": 200, "w": 800, "h": 400 }
+  ]
+}
+```
+
+The API key falls back to the `OPENAI_API_KEY` environment variable if the config field is null.
+
+## Logs
+
+`%APPDATA%\autoclicker\logs\autoclicker.log` (rotating, 2 MB × 3). Obvious secrets (`sk-…`, `ghp_…`, AWS keys) are redacted on the way out.
+
+## Safety guards
+
+- Classifier fails closed (missing key / API error / ambiguity → no click).
+- Per-command dedup for 5 s (avoids re-clicking the same prompt).
+- Global click cooldown (2 s) to prevent runaway loops.
+- Aborts if the user is actively moving the mouse within 1 s of the planned click.
+- `pyautogui` failsafe: slam the mouse into any screen corner to immediately abort.
+
+## Building the exe
+
+On a Windows host:
+
+```pwsh
+pip install -e .[dev]
+python build_windows.py
+```
+
+Produces `dist\autoclicker.exe`. Or let GitHub Actions build it — push to `main` or a `v*` tag and grab the artifact from the `build-windows` workflow.
+
+## Development from WSL / Linux
+
+The code is written on WSL but must **run** on Windows to see the Windows desktop. From WSL you can:
+
+- Edit and lint.
+- Run `pytest` for the classifier and detection unit tests.
+- Push to trigger the Windows CI build.
