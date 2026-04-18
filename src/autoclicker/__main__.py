@@ -3,6 +3,7 @@ import sys
 
 from .app import App
 from .config import load_config, save_config
+from .single_instance import acquire, show_already_running_dialog
 
 
 def main() -> int:
@@ -12,6 +13,11 @@ def main() -> int:
     parser.add_argument("--pick", action="store_true", help="Launch the region picker, save to config, and exit.")
     parser.add_argument("--clear-regions", action="store_true", help="Remove saved regions (fall back to full-screen scanning).")
     args = parser.parse_args()
+
+    if not (args.once or args.pick or args.clear_regions):
+        if not acquire():
+            show_already_running_dialog()
+            return 0
 
     cfg = load_config()
     if args.armed:
