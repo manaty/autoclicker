@@ -14,7 +14,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
-ENTRY = ROOT / "src" / "autoclicker" / "__main__.py"
+ENTRY = ROOT / "entry.py"
+SRC = ROOT / "src"
 
 
 def main() -> int:
@@ -39,6 +40,10 @@ def main() -> int:
         "--onefile",
         "--windowed",
         "--name",
+        "autoclicker",
+        "--paths",
+        str(SRC),
+        "--collect-all",
         "autoclicker",
         "--collect-all",
         "rapidocr_onnxruntime",
