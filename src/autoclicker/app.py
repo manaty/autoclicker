@@ -4,15 +4,17 @@ import time
 from .capture import ScreenCapturer
 from .click import Clicker
 from .config import Config, load_config, save_config
+from .control_window import ControlWindow
 from .detect import detect_prompt
 from .logging_setup import setup_logging
 from .ocr import Ocr
+from .overlay import OverlayController
 from .safety import classify
 from .state import Cooldown, DedupCache
-from .tray import TrayController
 
 
-def _truncate(s: str, n: int = 500) -> str:
+def _truncate(s: str, n: int = 120) -> str:
+    s = s.replace("\n", " ")
     return s if len(s) <= n else s[: n - 1] + "\u2026"
 
 
@@ -20,43 +22,69 @@ class App:
     def __init__(self, cfg: Config | None = None) -> None:
         self.cfg = cfg or load_config()
         self.log = setup_logging(self.cfg.log_level)
+
         self.armed = threading.Event()
         if self.cfg.armed_on_start:
             self.armed.set()
+        self.paused = threading.Event()
         self.stop_event = threading.Event()
-        self.pick_requested = threading.Event()
+        self._pick_requested = threading.Event()
+
         self._capturer: ScreenCapturer | None = None
         self._ocr: Ocr | None = None
         self._clicker: Clicker | None = None
         self._dedup = DedupCache(window_s=self.cfg.dedup_window_s)
         self._cooldown = Cooldown(interval_s=self.cfg.click_cooldown_s)
 
-    def _ensure_runtime(self) -> None:
-        if self._capturer is None:
-            self._capturer = ScreenCapturer()
-        if self._ocr is None:
-            self._ocr = Ocr()
-        if self._clicker is None:
-            self._clicker = Clicker(activity_radius_px=self.cfg.user_activity_radius_px)
+        self._window: ControlWindow | None = None
+        self._overlay: OverlayController | None = None
+        self._worker: threading.Thread | None = None
 
+    # ---- lifecycle -------------------------------------------------------
     def run(self) -> None:
         self.log.info(
-            "autoclicker starting (armed=%s, model=%s, regions=%d, ai_check=%s)",
+            "autoclicker starting (armed=%s, paused=%s, model=%s, regions=%d, ai_check=%s, interval=%dms)",
             self.armed.is_set(),
+            self.paused.is_set(),
             self.cfg.model,
             len(self.cfg.regions),
-            "on" if self.cfg.resolved_api_key() else "OFF (no OPENAI_API_KEY)",
+            "on" if self.cfg.resolved_api_key() else "OFF",
+            self.cfg.poll_interval_ms,
         )
-        tray = TrayController(
-            self.armed,
+
+        self._window = ControlWindow(
+            armed=self.armed,
+            paused=self.paused,
             on_quit=self.stop,
-            on_pick_regions=self.pick_requested.set,
+            on_pick_regions=self._request_pick,
+            on_clear_regions=self._clear_regions,
         )
-        tray_thread = threading.Thread(target=tray.run, name="tray", daemon=True)
-        tray_thread.start()
+        self._window.build()
+        self._window.set_status(
+            armed=self.armed.is_set(),
+            paused=self.paused.is_set(),
+            ai_check=bool(self.cfg.resolved_api_key()),
+            region_count=len(self.cfg.regions),
+        )
+
+        # Ensure runtime (capture + OCR) lazily on the worker, but we need
+        # monitors now for overlays.
+        self._ensure_capturer()
+        self._overlay = OverlayController(self._window.root)
+        self._refresh_overlay()
+
+        self._worker = threading.Thread(target=self._worker_loop, name="detect", daemon=True)
+        self._worker.start()
+
+        # Main-thread pick dispatcher — worker requests a pick, main thread runs it.
+        self._schedule_pick_dispatch()
+
         try:
-            self._loop()
+            self._window.run()
         finally:
+            self.stop_event.set()
+            if self._overlay:
+                self._overlay.clear()
             if self._capturer:
                 self._capturer.close()
             self.log.info("autoclicker stopped")
@@ -64,35 +92,84 @@ class App:
     def stop(self) -> None:
         self.stop_event.set()
 
-    def _loop(self) -> None:
-        interval = self.cfg.poll_interval_ms / 1000.0
-        while not self.stop_event.is_set():
-            start = time.monotonic()
-            try:
-                self._ensure_runtime()
-                if self.pick_requested.is_set():
-                    self.pick_requested.clear()
-                    self._run_picker()
-                    continue
-                self._tick()
-            except Exception as exc:  # noqa: BLE001
-                self.log.exception("tick failed: %s", exc)
-            elapsed = time.monotonic() - start
-            sleep_for = max(0.05, interval - elapsed)
-            self.stop_event.wait(sleep_for)
+    # ---- runtime setup ---------------------------------------------------
+    def _ensure_capturer(self) -> None:
+        if self._capturer is None:
+            self._capturer = ScreenCapturer()
+
+    def _ensure_ocr(self) -> None:
+        if self._ocr is None:
+            self._ocr = Ocr()
+
+    def _ensure_clicker(self) -> None:
+        if self._clicker is None:
+            self._clicker = Clicker(activity_radius_px=self.cfg.user_activity_radius_px)
+
+    def _refresh_overlay(self) -> None:
+        if self._overlay is None or self._capturer is None:
+            return
+        self._overlay.set(self.cfg.regions, self._capturer.monitors)
+        if self._window:
+            self._window.set_status(region_count=len(self.cfg.regions))
+
+    # ---- button callbacks (called on Tk thread) -------------------------
+    def _request_pick(self) -> None:
+        self._pick_requested.set()
+
+    def _clear_regions(self) -> None:
+        self.cfg.regions = []
+        save_config(self.cfg)
+        self.log.info("regions cleared")
+        self._refresh_overlay()
+
+    def _schedule_pick_dispatch(self) -> None:
+        if self._window is None or self._window.root is None:
+            return
+        if self._pick_requested.is_set():
+            self._pick_requested.clear()
+            self._run_picker()
+        self._window.root.after(150, self._schedule_pick_dispatch)
 
     def _run_picker(self) -> None:
         from .region_picker import pick_regions
 
-        assert self._capturer
-        self.log.info("launching region picker on %d monitor(s)", len(self._capturer.monitors))
-        regions = pick_regions(self._capturer.monitors)
+        assert self._capturer is not None
+        self.log.info("launching region picker")
+        if self._overlay:
+            self._overlay.clear()
+        try:
+            regions = pick_regions(self._capturer.monitors, parent=self._window.root)
+        finally:
+            self._refresh_overlay()
         if not regions:
-            self.log.info("region picker cancelled — keeping existing %d region(s)", len(self.cfg.regions))
+            self.log.info("picker cancelled — keeping %d existing region(s)", len(self.cfg.regions))
             return
         self.cfg.regions = regions
         save_config(self.cfg)
         self.log.info("saved %d region(s)", len(regions))
+        self._refresh_overlay()
+
+    # ---- worker thread ---------------------------------------------------
+    def _worker_loop(self) -> None:
+        try:
+            self._ensure_capturer()
+            self._ensure_ocr()
+            self._ensure_clicker()
+        except Exception as exc:  # noqa: BLE001
+            self.log.exception("worker init failed: %s", exc)
+            return
+
+        interval = self.cfg.poll_interval_ms / 1000.0
+        while not self.stop_event.is_set():
+            start = time.monotonic()
+            if not self.paused.is_set():
+                try:
+                    self._tick()
+                except Exception as exc:  # noqa: BLE001
+                    self.log.exception("tick failed: %s", exc)
+            elapsed = time.monotonic() - start
+            sleep_for = max(0.1, interval - elapsed)
+            self.stop_event.wait(sleep_for)
 
     def _iter_frames(self):
         assert self._capturer
@@ -118,23 +195,24 @@ class App:
             if self._dedup.seen_recently(det.command_text, frame.monitor.index):
                 continue
 
+            cmd_short = _truncate(det.command_text)
             self.log.info(
-                "detected prompt on monitor %d: command=%r yes@(%d,%d)",
-                frame.monitor.index,
-                _truncate(det.command_text),
-                det.yes_click_x,
-                det.yes_click_y,
+                "detected on monitor %d: cmd=%r yes@(%d,%d)",
+                frame.monitor.index, cmd_short, det.yes_click_x, det.yes_click_y,
             )
+            if self._window:
+                self._window.set_status(last_detection=cmd_short)
 
             result = classify(det.command_text, self.cfg)
             verdict = result.verdict
             self.log.info(
                 "classifier: safe=%s category=%s reason=%s%s",
-                verdict.safe,
-                verdict.category,
-                verdict.reason,
+                verdict.safe, verdict.category, verdict.reason,
                 f" error={result.error}" if result.error else "",
             )
+            if self._window:
+                v_label = f"{'OK' if verdict.safe else 'BLOCK'} · {verdict.category}"
+                self._window.set_status(last_verdict=v_label)
 
             if not verdict.safe:
                 self.log.warning("BLOCKED: %s", verdict.reason)

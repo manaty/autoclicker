@@ -16,7 +16,7 @@ class Config(BaseModel):
     openai_api_key: Optional[str] = None
     model: str = DEFAULT_MODEL
     model_fallback: str = DEFAULT_MODEL_FALLBACK
-    poll_interval_ms: int = Field(default=750, ge=200, le=10_000)
+    poll_interval_ms: int = Field(default=5000, ge=200, le=30_000)
     armed_on_start: bool = False
     log_level: str = "INFO"
     click_cooldown_s: float = 2.0
