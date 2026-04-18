@@ -4,14 +4,26 @@ Desktop watcher that auto-approves Claude Code's `Allow this bash command?` prom
 
 ## How it works
 
-1. Every ~750 ms, captures each monitored **region** (or full screens if none configured).
+1. Every 5 s (configurable), captures each monitored **region** (or full screens if none configured).
 2. Runs OCR (RapidOCR — pure ONNX, no Tesseract needed).
-3. Detects the Claude Code prompt by looking for the `Allow this bash command?` header together with `1 Yes` / `2 No` option lines. Frames without all markers are ignored.
+3. Detects the Claude Code prompt by looking for the `Allow this bash command?` header together with `1 Yes` / `2-9 No` option lines. Frames without all markers are ignored.
 4. Extracts the command text between the header and the options.
 5. Sends it to OpenAI `gpt-5.4-nano-2026-03-17` with a Structured-Outputs schema asking for `{safe, category, reason}`.
-6. If the verdict is `safe: true` **and** the app is armed, moves the mouse to the Yes button's pixel coords and clicks. Otherwise logs the decision and moves on.
+6. If the verdict is `safe: true` **and** the app is armed, moves the mouse to the Yes button's pixel coords and clicks. Otherwise logs the decision.
 
-The classifier fails **closed** on API errors or an uncertain verdict → no click. If `OPENAI_API_KEY` isn't set at all, the AI check is skipped and detections proceed as if safe (startup log prints `ai_check=OFF`).
+The classifier fails **closed** on API errors or an uncertain verdict → no click. If `OPENAI_API_KEY` isn't set at all, the AI check is skipped and detections proceed as if safe (status bar shows `AI check: OFF`).
+
+## UI
+
+A small always-on-top control window (no tray icon). Shows the current state — **DRY-RUN / ARMED / PAUSED** — and five buttons:
+
+- **Arm / Disarm** — toggle real clicking vs dry-run.
+- **Pause / Resume** — stop/restart the scan loop entirely (no capture, no OCR, no API calls).
+- **Set monitored regions** — fullscreen overlay to draw/update regions.
+- **Clear regions** — fall back to full-screen scanning.
+- **Logs / Config / Quit** — open the log folder, the config JSON, or shut down.
+
+Each saved region is drawn as a permanent green click-through rectangle on screen, labeled `#1`, `#2`, … so you always see what the app is watching.
 
 ## Monitored regions
 
@@ -25,7 +37,7 @@ Regions are saved in `config.json` and persist across launches. Move/resize your
 
 ## First launch is dry-run
 
-By design. The tray icon starts as a grey circle (`DRY-RUN`). Detections are logged, nothing is clicked. Once you've watched the log and trust the detection, right-click the tray icon and pick **Arm auto-click** (green circle).
+By design. The control window opens in grey `DRY-RUN` mode. Detections are logged, nothing is clicked. Once you've watched the log and trust the detection, click **Arm auto-click** — header turns green and `ARMED`.
 
 ## Install — end user (exe)
 
@@ -48,7 +60,7 @@ Config lives at `%APPDATA%\autoclicker\config.json` (Windows) or `~/.config/auto
   "openai_api_key": null,
   "model": "gpt-5.4-nano-2026-03-17",
   "model_fallback": "gpt-5.4-nano",
-  "poll_interval_ms": 750,
+  "poll_interval_ms": 5000,
   "armed_on_start": false,
   "click_cooldown_s": 2.0,
   "dedup_window_s": 5.0,

@@ -53,8 +53,6 @@ def main() -> int:
         "pydantic",
         "--collect-submodules",
         "pyautogui",
-        "--collect-submodules",
-        "pystray",
         "--collect-data",
         "mss",
         str(ENTRY),
