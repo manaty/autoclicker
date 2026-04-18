@@ -35,7 +35,7 @@ jobs:
           python -c "import autoclicker; from autoclicker.config import load_config; load_config(); print('ok')"
 
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         with:
           name: autoclicker-windows
           path: dist/autoclicker.exe
