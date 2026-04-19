@@ -1,3 +1,4 @@
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterator, List
 
@@ -21,17 +22,29 @@ class Frame:
 
 
 class ScreenCapturer:
-    """Captures one frame per monitor. Skips the mss virtual 'All monitors' entry (index 0)."""
+    """Captures one frame per monitor.
+
+    ``mss`` uses a thread-local device context, so each calling thread gets
+    its own ``mss.mss()`` instance via ``threading.local``. The monitor list
+    is enumerated once on the construction thread and cached.
+    """
 
     def __init__(self) -> None:
-        import mss
-
-        self._sct = mss.mss()
+        self._tls = threading.local()
         self._monitors = self._build_monitor_list()
+
+    def _sct(self):
+        sct = getattr(self._tls, "sct", None)
+        if sct is None:
+            import mss
+
+            sct = mss.mss()
+            self._tls.sct = sct
+        return sct
 
     def _build_monitor_list(self) -> List[Monitor]:
         mons: List[Monitor] = []
-        for idx, m in enumerate(self._sct.monitors):
+        for idx, m in enumerate(self._sct().monitors):
             if idx == 0:
                 continue
             mons.append(
@@ -52,8 +65,9 @@ class ScreenCapturer:
     def grab_all(self) -> Iterator[Frame]:
         import numpy as np
 
+        sct = self._sct()
         for mon in self._monitors:
-            raw = self._sct.grab({
+            raw = sct.grab({
                 "left": mon.left,
                 "top": mon.top,
                 "width": mon.width,
@@ -75,7 +89,7 @@ class ScreenCapturer:
         if mon is None:
             raise ValueError(f"monitor {region.monitor_index} not found")
 
-        raw = self._sct.grab({
+        raw = self._sct().grab({
             "left": mon.left + region.x,
             "top": mon.top + region.y,
             "width": region.w,
@@ -92,4 +106,10 @@ class ScreenCapturer:
         return Frame(monitor=virtual, image=img)
 
     def close(self) -> None:
-        self._sct.close()
+        sct = getattr(self._tls, "sct", None)
+        if sct is not None:
+            try:
+                sct.close()
+            except Exception:
+                pass
+            self._tls.sct = None
