@@ -58,6 +58,7 @@ class App:
             on_quit=self.stop,
             on_pick_regions=self._request_pick,
             on_clear_regions=self._clear_regions,
+            on_arm_toggle=self._on_arm_toggle,
         )
         self._window.build()
         self._window.set_status(
@@ -116,6 +117,15 @@ class App:
     def _request_pick(self) -> None:
         self._pick_requested.set()
 
+    def _on_arm_toggle(self) -> None:
+        """Called from the control window whenever armed state flips.
+
+        Clears dedup so a prompt that's already on screen (and was logged
+        in the previous mode) is re-processed immediately in the new mode.
+        """
+        self._dedup = DedupCache(window_s=self.cfg.dedup_window_s)
+        self.log.info("armed=%s (dedup cleared)", self.armed.is_set())
+
     def _clear_regions(self) -> None:
         self.cfg.regions = []
         save_config(self.cfg)
@@ -160,9 +170,17 @@ class App:
             return
 
         interval = self.cfg.poll_interval_ms / 1000.0
+        heartbeat_every = max(1, int(60 / max(1.0, interval)))
+        ticks = 0
         while not self.stop_event.is_set():
+            ticks += 1
             start = time.monotonic()
             if not self.paused.is_set():
+                if ticks % heartbeat_every == 0:
+                    self.log.info(
+                        "heartbeat: armed=%s paused=%s regions=%d",
+                        self.armed.is_set(), self.paused.is_set(), len(self.cfg.regions),
+                    )
                 try:
                     self._tick()
                 except Exception as exc:  # noqa: BLE001
@@ -184,15 +202,23 @@ class App:
 
     def _tick(self) -> None:
         assert self._capturer and self._ocr
+        frames_scanned = 0
+        detections = 0
         for frame in self._iter_frames():
+            frames_scanned += 1
             lines = self._ocr.run(frame.image)
             if not lines:
                 continue
             det = detect_prompt(lines, frame.monitor)
             if det is None:
                 continue
+            detections += 1
 
             if self._dedup.seen_recently(det.command_text, frame.monitor.index):
+                self.log.debug(
+                    "skipped: dedup hit on monitor %d (cmd=%r)",
+                    frame.monitor.index, _truncate(det.command_text, 80),
+                )
                 continue
 
             cmd_short = _truncate(det.command_text)

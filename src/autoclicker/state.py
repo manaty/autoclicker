@@ -40,6 +40,9 @@ class DedupCache:
         for k in stale:
             del self._seen[k]
 
+    def clear(self) -> None:
+        self._seen.clear()
+
 
 @dataclass
 class Cooldown:

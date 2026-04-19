@@ -35,12 +35,14 @@ class ControlWindow:
         on_quit: Callable[[], None],
         on_pick_regions: Callable[[], None],
         on_clear_regions: Callable[[], None],
+        on_arm_toggle: Optional[Callable[[], None]] = None,
     ) -> None:
         self._armed = armed
         self._paused = paused
         self._on_quit = on_quit
         self._on_pick_regions = on_pick_regions
         self._on_clear_regions = on_clear_regions
+        self._on_arm_toggle = on_arm_toggle
         self._status = Status()
         self._status_lock = threading.Lock()
         self._status_dirty = threading.Event()
@@ -115,6 +117,11 @@ class ControlWindow:
             self._armed.clear()
         else:
             self._armed.set()
+        if self._on_arm_toggle is not None:
+            try:
+                self._on_arm_toggle()
+            except Exception:
+                pass
         self._refresh()
 
     def _toggle_pause(self) -> None:
