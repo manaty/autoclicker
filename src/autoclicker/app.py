@@ -15,7 +15,11 @@ from .state import Cooldown, DedupCache
 
 def _truncate(s: str, n: int = 120) -> str:
     s = s.replace("\n", " ")
-    return s if len(s) <= n else s[: n - 1] + "\u2026"
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+# Recreate the capturer + OCR engine after this many consecutive tick failures.
+_RUNTIME_RESET_AFTER = 3
 
 
 class App:
@@ -28,6 +32,7 @@ class App:
             self.armed.set()
         self.paused = threading.Event()
         self.stop_event = threading.Event()
+        self._wakeup = threading.Event()
         self._pick_requested = threading.Event()
 
         self._capturer: ScreenCapturer | None = None
@@ -35,6 +40,7 @@ class App:
         self._clicker: Clicker | None = None
         self._dedup = DedupCache(window_s=self.cfg.dedup_window_s)
         self._cooldown = Cooldown(interval_s=self.cfg.click_cooldown_s)
+        self._consec_failures = 0
 
         self._window: ControlWindow | None = None
         self._overlay: OverlayController | None = None
@@ -59,6 +65,7 @@ class App:
             on_pick_regions=self._request_pick,
             on_clear_regions=self._clear_regions,
             on_arm_toggle=self._on_arm_toggle,
+            on_pause_toggle=self._on_pause_toggle,
         )
         self._window.build()
         self._window.set_status(
@@ -74,16 +81,18 @@ class App:
         self._overlay = OverlayController(self._window.root)
         self._refresh_overlay()
 
-        self._worker = threading.Thread(target=self._worker_loop, name="detect", daemon=True)
-        self._worker.start()
+        self._start_worker()
 
         # Main-thread pick dispatcher — worker requests a pick, main thread runs it.
         self._schedule_pick_dispatch()
+        # Worker watchdog — surface a dead worker in the UI and try to restart.
+        self._schedule_worker_watchdog()
 
         try:
             self._window.run()
         finally:
             self.stop_event.set()
+            self._wakeup.set()
             if self._overlay:
                 self._overlay.clear()
             if self._capturer:
@@ -92,6 +101,7 @@ class App:
 
     def stop(self) -> None:
         self.stop_event.set()
+        self._wakeup.set()
 
     # ---- runtime setup ---------------------------------------------------
     def _ensure_capturer(self) -> None:
@@ -105,6 +115,28 @@ class App:
     def _ensure_clicker(self) -> None:
         if self._clicker is None:
             self._clicker = Clicker(activity_radius_px=self.cfg.user_activity_radius_px)
+
+    def _reset_runtime(self) -> None:
+        """Drop and rebuild capture + OCR after repeated tick failures.
+
+        ``mss`` can return permanently empty frames after a display-config
+        change (RDP reconnect, monitor sleep). RapidOCR's ONNX session has
+        also been known to wedge after long uptime. Easier to recreate both
+        than to diagnose live.
+        """
+        self.log.warning("resetting runtime after %d consecutive failures", self._consec_failures)
+        try:
+            if self._capturer is not None:
+                self._capturer.close()
+        except Exception:
+            pass
+        self._capturer = None
+        self._ocr = None
+        try:
+            self._ensure_capturer()
+            self._ensure_ocr()
+        except Exception as exc:  # noqa: BLE001
+            self.log.exception("runtime reset failed: %s", exc)
 
     def _refresh_overlay(self) -> None:
         if self._overlay is None or self._capturer is None:
@@ -124,7 +156,15 @@ class App:
         in the previous mode) is re-processed immediately in the new mode.
         """
         self._dedup = DedupCache(window_s=self.cfg.dedup_window_s)
+        self._wakeup.set()
         self.log.info("armed=%s (dedup cleared)", self.armed.is_set())
+
+    def _on_pause_toggle(self) -> None:
+        # Same reasoning as arm toggle: a prompt seen just before pause is in
+        # dedup; on resume the user expects it to be re-processed immediately.
+        self._dedup = DedupCache(window_s=self.cfg.dedup_window_s)
+        self._wakeup.set()
+        self.log.info("paused=%s (dedup cleared)", self.paused.is_set())
 
     def _clear_regions(self) -> None:
         self.cfg.regions = []
@@ -139,6 +179,22 @@ class App:
             self._pick_requested.clear()
             self._run_picker()
         self._window.root.after(150, self._schedule_pick_dispatch)
+
+    def _schedule_worker_watchdog(self) -> None:
+        if self._window is None or self._window.root is None:
+            return
+        if self.stop_event.is_set():
+            return
+        if self._worker is not None and not self._worker.is_alive():
+            self.log.error("worker thread died — restarting")
+            if self._window:
+                self._window.set_status(last_verdict="WORKER DIED — restarting")
+            self._start_worker()
+        self._window.root.after(1000, self._schedule_worker_watchdog)
+
+    def _start_worker(self) -> None:
+        self._worker = threading.Thread(target=self._worker_loop, name="detect", daemon=True)
+        self._worker.start()
 
     def _run_picker(self) -> None:
         from .region_picker import pick_regions
@@ -175,19 +231,36 @@ class App:
         while not self.stop_event.is_set():
             ticks += 1
             start = time.monotonic()
-            if not self.paused.is_set():
+            paused = self.paused.is_set()
+            if not paused:
                 if ticks % heartbeat_every == 0:
                     self.log.info(
-                        "heartbeat: armed=%s paused=%s regions=%d",
-                        self.armed.is_set(), self.paused.is_set(), len(self.cfg.regions),
+                        "heartbeat: armed=%s paused=%s regions=%d failures=%d",
+                        self.armed.is_set(), self.paused.is_set(),
+                        len(self.cfg.regions), self._consec_failures,
                     )
                 try:
                     self._tick()
+                    self._consec_failures = 0
                 except Exception as exc:  # noqa: BLE001
-                    self.log.exception("tick failed: %s", exc)
+                    self._consec_failures += 1
+                    self.log.exception(
+                        "tick failed (%d in a row): %s", self._consec_failures, exc,
+                    )
+                    if self._consec_failures >= _RUNTIME_RESET_AFTER:
+                        self._reset_runtime()
+                        self._consec_failures = 0
+
             elapsed = time.monotonic() - start
-            sleep_for = max(0.1, interval - elapsed)
-            self.stop_event.wait(sleep_for)
+            # Use a short wait when paused so resume is responsive (<=0.5s),
+            # full poll interval otherwise. _wakeup is set on toggle events
+            # and on stop, which lets us bail out instantly.
+            sleep_for = 0.5 if paused else max(0.1, interval - elapsed)
+            self._wakeup.clear()
+            woke = self._wakeup.wait(sleep_for)
+            if woke:
+                # Drain any further sets so we don't burn CPU.
+                self._wakeup.clear()
 
     def _iter_frames(self):
         assert self._capturer
@@ -223,11 +296,12 @@ class App:
 
             cmd_short = _truncate(det.command_text)
             self.log.info(
-                "detected on monitor %d: cmd=%r yes@(%d,%d)",
-                frame.monitor.index, cmd_short, det.yes_click_x, det.yes_click_y,
+                "detected [%s] on monitor %d: cmd=%r yes@(%d,%d)",
+                det.source, frame.monitor.index, cmd_short,
+                det.yes_click_x, det.yes_click_y,
             )
             if self._window:
-                self._window.set_status(last_detection=cmd_short)
+                self._window.set_status(last_detection=f"[{det.source}] {cmd_short}")
 
             result = classify(det.command_text, self.cfg)
             verdict = result.verdict

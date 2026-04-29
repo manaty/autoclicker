@@ -6,9 +6,17 @@ from pydantic import BaseModel, Field
 from .config import Config
 
 
-SYSTEM_PROMPT = """You classify a single shell command extracted from a Claude Code 'Allow this bash command?' dialog.
+SYSTEM_PROMPT = """You classify text scraped from a CLI coding-assistant confirmation dialog
+(Claude Code's 'Allow this bash command?' prompt, or Codex CLI's 'Yes / No, and tell Codex what to do differently' prompt).
 
-Mark it UNSAFE if it is plausibly destructive, irreversible, privilege-escalating, or exfiltrates data. Examples of UNSAFE:
+The text usually contains:
+  - An optional question / title (in any language, e.g. French).
+  - One or more shell commands that the assistant wants to execute (often in a code block).
+
+Focus on the actual shell command(s). Ignore prose, explanations, or UI labels.
+If you can't identify any command, return safe=false with category='unparsable'.
+
+Mark UNSAFE if any command is plausibly destructive, irreversible, privilege-escalating, or exfiltrates data. Examples of UNSAFE:
 - rm -rf, rm of many files, rmdir of non-empty dirs
 - git reset --hard, git clean -fdx, git push --force (especially to main/master), git branch -D
 - Any DROP TABLE, TRUNCATE, DELETE without WHERE
