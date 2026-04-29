@@ -29,11 +29,21 @@ Each saved region is drawn as a permanent green click-through rectangle on scree
 
 Full-screen OCR on a 2K/4K display is the slow path. Defining one or more ROIs over your Claude Code pane is **10-20× faster** and eliminates most false positives. Two ways to set them:
 
-- **Tray menu → "Set monitored regions"**: fullscreen translucent overlay appears per monitor. Drag to add rectangles, right-click to remove the last one, Enter to save, Esc to cancel.
+- **Control window → "Set monitored regions"**: fullscreen translucent overlay appears per monitor. Drag to add rectangles, right-click to remove the last one, Enter to save, Esc to cancel.
 - **CLI**: `python -m autoclicker --pick` (or `autoclicker --pick` for the exe) runs just the picker and exits.
 - Clear them with `autoclicker --clear-regions` (falls back to full-screen scan).
 
 Regions are saved in `config.json` and persist across launches. Move/resize your terminal? Just rerun the picker.
+
+### Multiple windows on one monitor — "Add window region"
+
+When you've got several VSCode windows on a single screen (e.g. several Claude Code sessions side-by-side or stacked), use **Add window region**:
+
+1. A list of currently-visible top-level windows opens.
+2. Pick the one you want to monitor; the title-match field defaults to a stable substring (for VSCode: `"<workspace> - Visual Studio Code"`).
+3. Confirm — the window is brought to the foreground and the rectangle picker appears on top of it. Draw one or more regions and press Enter.
+
+At runtime, **when armed**, the autoclicker brings each tracked window to the foreground in turn before capturing its regions. The previously-foreground window is restored at the end of every poll cycle. In dry-run / paused mode the foreground is left alone, so you can keep working without flicker. Each region is stored with its `window_title_match` substring in `config.json` so the binding survives restarts.
 
 ## First launch is dry-run
 

@@ -11,7 +11,13 @@ from .capture import Monitor
 from .regions import Region
 
 
-def pick_regions(monitors: List[Monitor], parent=None) -> List[Region]:
+def pick_regions(
+    monitors: List[Monitor],
+    parent=None,
+    only_monitor_index: Optional[int] = None,
+    window_title_match: Optional[str] = None,
+    hint_suffix: str = "",
+) -> List[Region]:
     import tkinter as tk
 
     owns_root = parent is None
@@ -19,18 +25,37 @@ def pick_regions(monitors: List[Monitor], parent=None) -> List[Region]:
     if owns_root:
         root.withdraw()
 
+    if only_monitor_index is not None:
+        target_monitors = [m for m in monitors if m.index == only_monitor_index]
+    else:
+        target_monitors = list(monitors)
+
     picked: List[Region] = []
-    for idx, mon in enumerate(monitors, start=1):
-        rects = _pick_on_monitor(root, mon, current=idx, total=len(monitors))
+    for idx, mon in enumerate(target_monitors, start=1):
+        rects = _pick_on_monitor(
+            root, mon,
+            current=idx,
+            total=len(target_monitors),
+            hint_suffix=hint_suffix,
+        )
         for (x, y, w, h) in rects:
-            picked.append(Region(monitor_index=mon.index, x=x, y=y, w=w, h=h))
+            picked.append(Region(
+                monitor_index=mon.index, x=x, y=y, w=w, h=h,
+                window_title_match=window_title_match,
+            ))
 
     if owns_root:
         root.destroy()
     return picked
 
 
-def _pick_on_monitor(parent, monitor: Monitor, current: int, total: int) -> List[Tuple[int, int, int, int]]:
+def _pick_on_monitor(
+    parent,
+    monitor: Monitor,
+    current: int,
+    total: int,
+    hint_suffix: str = "",
+) -> List[Tuple[int, int, int, int]]:
     import tkinter as tk
 
     rects: List[Tuple[int, int, int, int]] = []
@@ -46,10 +71,11 @@ def _pick_on_monitor(parent, monitor: Monitor, current: int, total: int) -> List
     canvas = tk.Canvas(win, bg="black", highlightthickness=0, cursor="crosshair")
     canvas.pack(fill="both", expand=True)
 
-    hint = (
+    hint_base = (
         f"Monitor {monitor.index}  ({current}/{total})   "
         "drag = add rect   right-click = clear last   Enter = save   Esc = cancel"
     )
+    hint = f"{hint_base}    [{hint_suffix}]" if hint_suffix else hint_base
 
     def redraw_header():
         canvas.delete("header")
