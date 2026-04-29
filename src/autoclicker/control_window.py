@@ -37,6 +37,7 @@ class ControlWindow:
         on_clear_regions: Callable[[], None],
         on_arm_toggle: Optional[Callable[[], None]] = None,
         on_pause_toggle: Optional[Callable[[], None]] = None,
+        on_pick_window_region: Optional[Callable[[], None]] = None,
     ) -> None:
         self._armed = armed
         self._paused = paused
@@ -45,6 +46,7 @@ class ControlWindow:
         self._on_clear_regions = on_clear_regions
         self._on_arm_toggle = on_arm_toggle
         self._on_pause_toggle = on_pause_toggle
+        self._on_pick_window_region = on_pick_window_region
         self._status = Status()
         self._status_lock = threading.Lock()
         self._status_dirty = threading.Event()
@@ -56,7 +58,7 @@ class ControlWindow:
 
         root = tk.Tk()
         root.title("autoclicker")
-        root.geometry("260x280")
+        root.geometry("260x310")
         root.resizable(False, False)
         root.attributes("-topmost", True)
         self.root = root
@@ -91,6 +93,7 @@ class ControlWindow:
         self._pause_btn.pack(fill="x", pady=2)
 
         ttk.Button(btn_frame, text="Set monitored regions", command=self._pick).pack(fill="x", pady=2)
+        ttk.Button(btn_frame, text="Add window region", command=self._pick_window).pack(fill="x", pady=2)
         ttk.Button(btn_frame, text="Clear regions", command=self._clear).pack(fill="x", pady=2)
 
         bottom = tk.Frame(root)
@@ -140,6 +143,10 @@ class ControlWindow:
 
     def _pick(self) -> None:
         self._on_pick_regions()
+
+    def _pick_window(self) -> None:
+        if self._on_pick_window_region is not None:
+            self._on_pick_window_region()
 
     def _clear(self) -> None:
         self._on_clear_regions()

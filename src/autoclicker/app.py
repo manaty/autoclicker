@@ -34,6 +34,7 @@ class App:
         self.stop_event = threading.Event()
         self._wakeup = threading.Event()
         self._pick_requested = threading.Event()
+        self._pick_window_requested = threading.Event()
 
         self._capturer: ScreenCapturer | None = None
         self._ocr: Ocr | None = None
@@ -66,6 +67,7 @@ class App:
             on_clear_regions=self._clear_regions,
             on_arm_toggle=self._on_arm_toggle,
             on_pause_toggle=self._on_pause_toggle,
+            on_pick_window_region=self._request_pick_window,
         )
         self._window.build()
         self._window.set_status(
@@ -149,6 +151,9 @@ class App:
     def _request_pick(self) -> None:
         self._pick_requested.set()
 
+    def _request_pick_window(self) -> None:
+        self._pick_window_requested.set()
+
     def _on_arm_toggle(self) -> None:
         """Called from the control window whenever armed state flips.
 
@@ -178,6 +183,9 @@ class App:
         if self._pick_requested.is_set():
             self._pick_requested.clear()
             self._run_picker()
+        if self._pick_window_requested.is_set():
+            self._pick_window_requested.clear()
+            self._run_window_picker()
         self._window.root.after(150, self._schedule_pick_dispatch)
 
     def _schedule_worker_watchdog(self) -> None:
@@ -213,6 +221,72 @@ class App:
         self.cfg.regions = regions
         save_config(self.cfg)
         self.log.info("saved %d region(s)", len(regions))
+        self._refresh_overlay()
+
+    def _run_window_picker(self) -> None:
+        """Pick a window, foreground it, then draw region(s) on its monitor."""
+        from .region_picker import pick_regions
+        from .window import bring_to_front
+        from .window_picker import pick_window
+
+        assert self._capturer is not None
+        self.log.info("launching window picker")
+        if self._overlay:
+            self._overlay.clear()
+
+        picked = None
+        try:
+            picked = pick_window(parent=self._window.root)
+        except Exception as exc:  # noqa: BLE001
+            self.log.exception("window picker failed: %s", exc)
+        if picked is None:
+            self.log.info("window picker cancelled")
+            self._refresh_overlay()
+            return
+
+        win, title_match = picked
+        self.log.info(
+            "picked window hwnd=%#x title=%r match=%r",
+            win.hwnd, win.title, title_match,
+        )
+
+        # Bring the chosen window to front so the user draws on top of the
+        # right content. find_monitor: which monitor contains the window center?
+        try:
+            bring_to_front(win.hwnd)
+        except Exception:
+            pass
+        cx = (win.left + win.right) // 2
+        cy = (win.top + win.bottom) // 2
+        target_mon = next(
+            (
+                m for m in self._capturer.monitors
+                if m.left <= cx < m.left + m.width and m.top <= cy < m.top + m.height
+            ),
+            None,
+        )
+        only_idx = target_mon.index if target_mon else None
+
+        try:
+            new_regions = pick_regions(
+                self._capturer.monitors,
+                parent=self._window.root,
+                only_monitor_index=only_idx,
+                window_title_match=title_match,
+                hint_suffix=f"window: {title_match}",
+            )
+        finally:
+            self._refresh_overlay()
+
+        if not new_regions:
+            self.log.info("window region picker cancelled")
+            return
+        self.cfg.regions = list(self.cfg.regions) + new_regions
+        save_config(self.cfg)
+        self.log.info(
+            "added %d window region(s) for %r (total=%d)",
+            len(new_regions), title_match, len(self.cfg.regions),
+        )
         self._refresh_overlay()
 
     # ---- worker thread ---------------------------------------------------
@@ -263,15 +337,56 @@ class App:
                 self._wakeup.clear()
 
     def _iter_frames(self):
+        """Yield captured frames, foregrounding window-bound regions when armed.
+
+        Regions are grouped by ``window_title_match``. When armed, each group
+        with a non-empty pattern triggers a ``bring_to_front`` before the
+        region is captured — so multiple VSCode windows on a single monitor
+        can each be checked. The previously-foreground window is restored
+        at the end via the generator's ``finally`` block.
+        """
         assert self._capturer
-        if self.cfg.regions:
-            for region in self.cfg.regions:
-                try:
-                    yield self._capturer.grab_region(region)
-                except ValueError:
-                    continue
-        else:
+        if not self.cfg.regions:
             yield from self._capturer.grab_all()
+            return
+
+        from .window import bring_to_front, find_window, get_foreground
+
+        # Stable group order = first-seen order in cfg.regions.
+        groups: "dict[str | None, list]" = {}
+        for region in self.cfg.regions:
+            key = (region.window_title_match or "").strip() or None
+            groups.setdefault(key, []).append(region)
+
+        switch_focus = self.armed.is_set() and any(k for k in groups)
+        saved_fg_hwnd: int | None = None
+        if switch_focus:
+            fg = get_foreground()
+            if fg is not None:
+                saved_fg_hwnd = fg.hwnd
+
+        try:
+            for pattern, regions in groups.items():
+                if pattern and switch_focus:
+                    target = find_window(pattern)
+                    if target is None:
+                        self.log.debug(
+                            "window pattern %r not matched; skipping %d region(s)",
+                            pattern, len(regions),
+                        )
+                        continue
+                    bring_to_front(target.hwnd)
+                for region in regions:
+                    try:
+                        yield self._capturer.grab_region(region)
+                    except ValueError:
+                        continue
+        finally:
+            if saved_fg_hwnd is not None:
+                try:
+                    bring_to_front(saved_fg_hwnd, settle_s=0.0)
+                except Exception:
+                    pass
 
     def _tick(self) -> None:
         assert self._capturer and self._ocr

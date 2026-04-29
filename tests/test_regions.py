@@ -15,6 +15,17 @@ def test_region_model_validates():
     r = Region(monitor_index=1, x=100, y=200, w=400, h=300)
     assert r.monitor_index == 1
     assert (r.x, r.y, r.w, r.h) == (100, 200, 400, 300)
+    assert r.window_title_match is None
+
+
+def test_region_model_window_title_match():
+    if not _HAS_PYDANTIC:
+        return
+    r = Region(
+        monitor_index=1, x=0, y=0, w=100, h=100,
+        window_title_match="autoclicker - Visual Studio Code",
+    )
+    assert r.window_title_match == "autoclicker - Visual Studio Code"
 
 
 def test_detect_on_virtual_region_monitor():
