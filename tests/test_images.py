@@ -128,9 +128,20 @@ def test_empty_image_not_detected():
     assert det is None, "empty_image.png should produce no detection"
 
 
-@pytest.mark.parametrize("name", ["yes_image_1.png", "yes_image_2.png", "yes_image_3.png"])
-def test_yes_image_detected(name: str):
+@pytest.mark.parametrize(
+    "name,expected_source",
+    [
+        ("yes_image_1.png", "claude"),
+        ("yes_image_2.png", "claude"),
+        ("yes_image_3.png", "claude"),
+        ("yes_image_4.png", "codex"),
+    ],
+)
+def test_yes_image_detected(name: str, expected_source: str):
     lines, det = _process(name)
     assert det is not None, f"{name} should produce a detection (lines={len(lines)})"
     assert det.yes_click_x > 0 and det.yes_click_y > 0
     assert det.command_text.strip() != ""
+    assert det.source == expected_source, (
+        f"{name} expected source={expected_source!r} but got {det.source!r}"
+    )
