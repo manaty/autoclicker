@@ -80,6 +80,18 @@ def classify(command_text: str, cfg: Config) -> ClassifyResult:
             verdict = resp.choices[0].message.parsed
             if verdict is None:
                 continue
+            # OCR-garbled text → "unparsable". The user usually prefers
+            # to click anyway (the region just needs better picking).
+            if (
+                not verdict.safe
+                and verdict.category == "unparsable"
+                and getattr(cfg, "fail_open_on_unparsable", False)
+            ):
+                verdict = Verdict(
+                    safe=True,
+                    category="unparsable-fail-open",
+                    reason=f"OCR text was garbled; fail-open per config. (model: {verdict.reason})",
+                )
             return ClassifyResult(verdict=verdict)
         except Exception as exc:  # noqa: BLE001
             last_error = f"{model}: {exc}"

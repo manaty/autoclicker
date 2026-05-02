@@ -42,6 +42,11 @@ class Config(BaseModel):
     #   - task-done check   → behave as 'not_done' (send the Continue prompt).
     # Set to False to revert to fail-closed (safe but useless when API is flaky).
     fail_open_on_api_error: bool = True
+    # If True (default), the safety classifier clicks Yes when the OCR
+    # text is too garbled for the model to identify any command. That's
+    # usually a region-picker issue (region overlaps the wrong UI), not
+    # an actual unsafe command. Set to False to keep blocking those.
+    fail_open_on_unparsable: bool = True
     regions: List[Region] = Field(default_factory=list)
     window_sessions: List[WindowSession] = Field(default_factory=list)
 

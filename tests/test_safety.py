@@ -46,6 +46,25 @@ def test_api_error_fail_closed_when_disabled(monkeypatch):
     assert result.verdict.category == "api-error"
 
 
+@online_only
+def test_unparsable_text_fails_open_by_default():
+    cfg = Config()
+    assert cfg.fail_open_on_unparsable is True
+    # Garbled OCR-style text the model can't decode.
+    result = classify("apou xyz . . zzlx ((,. yaedlatyuos auatop", cfg)
+    # When the LLM returns 'unparsable', fail-open should flip safe→True.
+    assert result.verdict.safe is True
+    assert result.verdict.category == "unparsable-fail-open"
+
+
+@online_only
+def test_unparsable_text_blocks_when_disabled():
+    cfg = Config(fail_open_on_unparsable=False)
+    result = classify("apou xyz . . zzlx ((,. yaedlatyuos auatop", cfg)
+    assert result.verdict.safe is False
+    assert result.verdict.category == "unparsable"
+
+
 SAFE_COMMANDS = [
     "ls -la",
     "git status",
