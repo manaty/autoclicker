@@ -38,18 +38,21 @@ jobs:
           python -c "import autoclicker; from autoclicker.config import load_config; load_config(); print('ok')"
 
       # Stamp the version into the exe filename so users can keep multiple
-      # builds side-by-side without clobbering each other's downloads.
+      # downloads side-by-side. For tagged releases each tag gets its own
+      # filename. For the rolling 'latest' release we keep a stable name
+      # (so the URL doesn't change every commit) — the SHA goes in the
+      # release body instead.
       - name: Stamp version into exe filename
         id: stamp
         shell: pwsh
         run: |
           if ("${{ github.ref }}".StartsWith("refs/tags/v")) {
             $version = "${{ github.ref_name }}"      # e.g. v0.4.0
+            $renamed = "dist/autoclicker-$version.exe"
           } else {
-            $sha = "${{ github.sha }}".Substring(0, 7)
-            $version = "latest-$sha"
+            $version = "latest"
+            $renamed = "dist/autoclicker-latest.exe"
           }
-          $renamed = "dist/autoclicker-$version.exe"
           Move-Item dist/autoclicker.exe $renamed
           "exe_path=$renamed" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
