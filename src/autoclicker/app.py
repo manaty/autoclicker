@@ -317,7 +317,7 @@ class App:
         self._refresh_overlay()
 
     def _run_session_picker(self) -> None:
-        """Pick a window, list goals, click on chat input — save WindowSession."""
+        """Pick a region-bound window, list goals, click on chat input."""
         from .session_picker import configure_session
 
         assert self._capturer is not None
@@ -325,17 +325,30 @@ class App:
         if self._overlay:
             self._overlay.clear()
 
-        # If sessions exist, default to editing the first matching one for
-        # the picked window; otherwise create new. configure_session does
-        # the matching itself when 'existing' is supplied.
+        # Sessions only attach to windows we already monitor. Distinct
+        # title_matches from cfg.regions, in first-seen order.
+        seen: set[str] = set()
+        available: list[str] = []
+        for region in self.cfg.regions:
+            m = (region.window_title_match or "").strip()
+            if not m:
+                continue
+            key = m.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            available.append(m)
+
         try:
-            session = configure_session(parent=self._window.root)
+            session = configure_session(
+                parent=self._window.root,
+                available_matches=available,
+                existing_sessions=list(self.cfg.window_sessions),
+            )
         except Exception as exc:  # noqa: BLE001
             self.log.exception("session picker failed: %s", exc)
             self._refresh_overlay()
             return
-        finally:
-            pass
 
         if session is None:
             self.log.info("session picker cancelled")
@@ -348,7 +361,6 @@ class App:
             if s.title_match.lower() != session.title_match.lower()
         ] + [session]
         save_config(self.cfg)
-        # Reset idle state for this match — fresh session.
         self._idle.forget(session.title_match)
         self.log.info(
             "saved session for %r: %d goal(s), idle_threshold=%.0fs",

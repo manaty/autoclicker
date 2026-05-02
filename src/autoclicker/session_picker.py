@@ -1,7 +1,9 @@
 """Configure a per-window working session: goals + chat-input click target.
 
-Three steps in one Tk dialog flow:
-  1. Pick the window (reuses :func:`window_picker.pick_window`).
+Flow:
+  1. Pick a window from the list of windows you've already added regions
+     for. (You must run "Add window region" first — sessions only make
+     sense on a window the autoclicker is already watching.)
   2. Type the goals in a multi-line text box (one per line).
   3. Click on the assistant's chat-input field — recorded as the
      screen coords the autoclicker will click before pasting messages.
@@ -12,16 +14,22 @@ import time
 from typing import List, Optional
 
 from .sessions import WindowSession
-from .window import WindowInfo, bring_to_front
-from .window_picker import pick_window
+from .window import WindowInfo, bring_to_front, find_window
 
 
 def configure_session(
     parent=None,
-    existing: Optional[WindowSession] = None,
+    available_matches: Optional[List[str]] = None,
+    existing_sessions: Optional[List[WindowSession]] = None,
 ) -> Optional[WindowSession]:
+    """Open the session config dialog.
+
+    ``available_matches`` is the list of ``window_title_match`` strings
+    that already have at least one monitored region. The user picks one
+    of those. ``existing_sessions`` lets the dialog pre-fill the goals
+    + chat-input position when re-editing an already-configured session.
+    """
     import tkinter as tk
-    from tkinter import ttk
 
     owns_root = parent is None
     if owns_root:
@@ -30,18 +38,29 @@ def configure_session(
     else:
         root = parent
 
-    window: Optional[WindowInfo] = None
-    title_match: Optional[str] = None
+    available_matches = list(available_matches or [])
+    if not available_matches:
+        _show_error(
+            root,
+            "No window regions yet",
+            "Use 'Add window region' first to bind one or more regions to a window. "
+            "Sessions monitor change inside those regions, so a session without "
+            "regions has nothing to look at.",
+        )
+        if owns_root:
+            root.destroy()
+        return None
 
-    if existing is not None:
-        title_match = existing.title_match
-    else:
-        picked = pick_window(parent=root)
-        if picked is None:
-            if owns_root:
-                root.destroy()
-            return None
-        window, title_match = picked
+    existing_by_match = {
+        s.title_match.lower(): s for s in (existing_sessions or [])
+    }
+
+    title_match = _pick_match(root, available_matches, existing_by_match)
+    if title_match is None:
+        if owns_root:
+            root.destroy()
+        return None
+    existing = existing_by_match.get(title_match.lower())
 
     goals_text, idle_s, cooldown_s = _edit_goals(
         root,
@@ -64,15 +83,12 @@ def configure_session(
     ):
         coords = (existing.prompt_input_x, existing.prompt_input_y)
     else:
+        window = find_window(title_match)
         if window is None:
-            # Existing session re-edit: find the window by its match.
-            from .window import find_window
-            window = find_window(title_match)
-            if window is None:
-                _show_error(root, "Window not found", f"No visible window matched {title_match!r}.")
-                if owns_root:
-                    root.destroy()
-                return None
+            _show_error(root, "Window not found", f"No visible window matched {title_match!r}.")
+            if owns_root:
+                root.destroy()
+            return None
         try:
             bring_to_front(window.hwnd)
         except Exception:
@@ -96,6 +112,82 @@ def configure_session(
     if owns_root:
         root.destroy()
     return session
+
+
+def _pick_match(
+    parent,
+    matches: List[str],
+    existing_by_match: dict,
+) -> Optional[str]:
+    """List the windows the autoclicker is already watching."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    dlg = tk.Toplevel(parent)
+    dlg.title("Configure window session")
+    dlg.geometry("560x340")
+    dlg.attributes("-topmost", True)
+    dlg.transient(parent)
+    dlg.grab_set()
+
+    pad = {"padx": 10, "pady": 6}
+    tk.Label(
+        dlg,
+        text=(
+            "Pick a window to attach a session to.\n"
+            "(Only windows that already have monitored regions are listed.\n"
+            "Items shown in green already have a session — re-pick to edit it.)"
+        ),
+        anchor="w", justify="left", wraplength=540,
+    ).pack(fill="x", **pad)
+
+    list_frame = tk.Frame(dlg)
+    list_frame.pack(fill="both", expand=True, padx=10)
+    scroll = ttk.Scrollbar(list_frame, orient="vertical")
+    listbox = tk.Listbox(
+        list_frame, height=10, yscrollcommand=scroll.set,
+        font=("Segoe UI", 10), activestyle="dotbox",
+    )
+    scroll.config(command=listbox.yview)
+    listbox.pack(side="left", fill="both", expand=True)
+    scroll.pack(side="right", fill="y")
+
+    for m in matches:
+        sess = existing_by_match.get(m.lower())
+        if sess is None:
+            label = m
+        else:
+            tag = "✓ done" if sess.completed else "● configured"
+            label = f"{m}    [{tag} — {len(sess.goals)} goal(s)]"
+        listbox.insert("end", label)
+        # Color rows that already have a session.
+        if sess is not None:
+            color = "#ff9933" if sess.completed else "#37b24d"
+            listbox.itemconfig("end", foreground=color)
+    listbox.selection_set(0)
+
+    chosen: dict = {"value": None}
+
+    def on_ok():
+        sel = listbox.curselection()
+        if not sel:
+            return
+        chosen["value"] = matches[sel[0]]
+        dlg.destroy()
+
+    def on_cancel():
+        dlg.destroy()
+
+    btns = tk.Frame(dlg)
+    btns.pack(fill="x", **pad, side="bottom")
+    ttk.Button(btns, text="Cancel", command=on_cancel, width=10).pack(side="right", padx=4)
+    ttk.Button(btns, text="Next ▶", command=on_ok).pack(side="right")
+    dlg.bind("<Return>", lambda _e: on_ok())
+    dlg.bind("<Escape>", lambda _e: on_cancel())
+    listbox.focus_set()
+
+    dlg.wait_window()
+    return chosen["value"]
 
 
 def _edit_goals(
