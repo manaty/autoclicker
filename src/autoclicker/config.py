@@ -15,8 +15,20 @@ DEFAULT_MODEL_FALLBACK = "gpt-5.4-nano"
 
 class Config(BaseModel):
     openai_api_key: Optional[str] = None
+
+    # Default model for both classifiers when a per-classifier override
+    # isn't set. Kept for backwards compatibility with older configs.
     model: str = DEFAULT_MODEL
     model_fallback: str = DEFAULT_MODEL_FALLBACK
+
+    # Per-classifier overrides. Safety runs every poll cycle, so latency
+    # matters → keep it on a fast model. Task-check runs at most once
+    # per session.idle_threshold_s, so a slower reasoning model is fine.
+    safety_model: Optional[str] = None
+    safety_model_fallback: Optional[str] = None
+    task_check_model: Optional[str] = None
+    task_check_model_fallback: Optional[str] = None
+
     poll_interval_ms: int = Field(default=5000, ge=200, le=30_000)
     armed_on_start: bool = False
     log_level: str = "INFO"
@@ -35,6 +47,18 @@ class Config(BaseModel):
 
     def resolved_api_key(self) -> Optional[str]:
         return self.openai_api_key or os.environ.get("OPENAI_API_KEY")
+
+    def resolved_safety_models(self) -> tuple[str, str]:
+        return (
+            self.safety_model or self.model,
+            self.safety_model_fallback or self.model_fallback,
+        )
+
+    def resolved_task_check_models(self) -> tuple[str, str]:
+        return (
+            self.task_check_model or self.model,
+            self.task_check_model_fallback or self.model_fallback,
+        )
 
 
 def load_config() -> Config:

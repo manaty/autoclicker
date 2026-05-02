@@ -76,7 +76,8 @@ def check_task_done(
     )
 
     last_error: Optional[str] = None
-    for model in (cfg.model, cfg.model_fallback):
+    primary, fallback = cfg.resolved_task_check_models()
+    for model in (primary, fallback):
         try:
             resp = client.chat.completions.parse(
                 model=model,
