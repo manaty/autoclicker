@@ -60,8 +60,11 @@ class ControlWindow:
 
         root = tk.Tk()
         root.title("autoclicker")
-        root.geometry("260x340")
-        root.resizable(False, False)
+        # 6 main buttons + status + info + bottom row — needs ~400px tall.
+        # Allow vertical resize so users with small DPI can shrink it.
+        root.geometry("260x420")
+        root.minsize(260, 360)
+        root.resizable(False, True)
         root.attributes("-topmost", True)
         self.root = root
 
