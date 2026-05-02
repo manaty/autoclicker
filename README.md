@@ -45,6 +45,28 @@ When you've got several VSCode windows on a single screen (e.g. several Claude C
 
 At runtime, **when armed**, the autoclicker brings each tracked window to the foreground in turn before capturing its regions. The previously-foreground window is restored at the end of every poll cycle. In dry-run / paused mode the foreground is left alone, so you can keep working without flicker. Each region is stored with its `window_title_match` substring in `config.json` so the binding survives restarts.
 
+## Window sessions — pinging an idle assistant
+
+Beyond auto-approving Yes/No prompts, the autoclicker can also keep a stalled AI assistant moving. Per window, you give it a list of session goals; if the OCR text inside the window stops changing for longer than `idle_threshold_s` (default 60 s), the autoclicker:
+
+1. asks OpenAI whether the assistant has finished the goals,
+2. if **done** → pastes `as-tu tout terminé d'implémenter ?` into the chat input, presses Enter, and **marks the session completed** (its overlay rectangles turn orange — no further pings until you re-edit the goals),
+3. if **not done** → pastes `Continue la tâche.` and presses Enter,
+4. if the verdict is `unknown` → does nothing.
+
+After every action, the per-session cooldown (`cooldown_s`, default 300 s) blocks the next check, so the autoclicker can't loop on a chatty assistant.
+
+To set this up:
+
+1. Click **Configure window session** in the control window.
+2. Pick the AI's window from the list.
+3. Type goals (one per line). Adjust the idle / cooldown thresholds if needed.
+4. **Click on the chat input box** when the translucent overlay appears — that's the pixel the autoclicker will click before pasting messages.
+
+Sessions live in `config.json` under `window_sessions`. Re-running the picker for the same window replaces the existing session.
+
+Idleness checks only run **when armed**. In dry-run / paused mode the autoclicker still tracks change events (so you can watch the heartbeat in the log) but never types anything.
+
 ## First launch is dry-run
 
 By design. The control window opens in grey `DRY-RUN` mode. Detections are logged, nothing is clicked. Once you've watched the log and trust the detection, click **Arm auto-click** — header turns green and `ARMED`.
@@ -78,7 +100,19 @@ Config lives at `%APPDATA%\autoclicker\config.json` (Windows) or `~/.config/auto
   "openai_timeout_s": 4.0,
   "log_level": "INFO",
   "regions": [
-    { "monitor_index": 1, "x": 100, "y": 200, "w": 800, "h": 400 }
+    { "monitor_index": 1, "x": 100, "y": 200, "w": 800, "h": 400,
+      "window_title_match": "autoclicker - Visual Studio Code" }
+  ],
+  "window_sessions": [
+    {
+      "title_match": "autoclicker - Visual Studio Code",
+      "goals": ["Add Codex detection", "Cleanup tests"],
+      "prompt_input_x": 1234,
+      "prompt_input_y": 980,
+      "idle_threshold_s": 60,
+      "cooldown_s": 300,
+      "completed": false
+    }
   ]
 }
 ```

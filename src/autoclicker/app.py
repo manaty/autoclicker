@@ -6,11 +6,18 @@ from .click import Clicker
 from .config import Config, load_config, save_config
 from .control_window import ControlWindow
 from .detect import detect_prompt
+from .idle import IdleRegistry
 from .logging_setup import setup_logging
 from .ocr import Ocr
 from .overlay import OverlayController
 from .safety import classify
+from .sessions import WindowSession
 from .state import Cooldown, DedupCache
+from .task_check import check_task_done
+
+
+_TASK_CONTINUE_TEXT = "Continue la tâche."
+_TASK_DONE_CONFIRM_TEXT = "as-tu tout terminé d'implémenter ?"
 
 
 def _truncate(s: str, n: int = 120) -> str:
@@ -42,6 +49,9 @@ class App:
         self._dedup = DedupCache(window_s=self.cfg.dedup_window_s)
         self._cooldown = Cooldown(interval_s=self.cfg.click_cooldown_s)
         self._consec_failures = 0
+        self._idle = IdleRegistry()
+        self._pick_session_requested = threading.Event()
+        self._overlay_dirty = threading.Event()
 
         self._window: ControlWindow | None = None
         self._overlay: OverlayController | None = None
@@ -68,6 +78,7 @@ class App:
             on_arm_toggle=self._on_arm_toggle,
             on_pause_toggle=self._on_pause_toggle,
             on_pick_window_region=self._request_pick_window,
+            on_configure_session=self._request_pick_session,
         )
         self._window.build()
         self._window.set_status(
@@ -143,7 +154,11 @@ class App:
     def _refresh_overlay(self) -> None:
         if self._overlay is None or self._capturer is None:
             return
-        self._overlay.set(self.cfg.regions, self._capturer.monitors)
+        self._overlay.set(
+            self.cfg.regions,
+            self._capturer.monitors,
+            sessions=self.cfg.window_sessions,
+        )
         if self._window:
             self._window.set_status(region_count=len(self.cfg.regions))
 
@@ -153,6 +168,9 @@ class App:
 
     def _request_pick_window(self) -> None:
         self._pick_window_requested.set()
+
+    def _request_pick_session(self) -> None:
+        self._pick_session_requested.set()
 
     def _on_arm_toggle(self) -> None:
         """Called from the control window whenever armed state flips.
@@ -167,9 +185,12 @@ class App:
     def _on_pause_toggle(self) -> None:
         # Same reasoning as arm toggle: a prompt seen just before pause is in
         # dedup; on resume the user expects it to be re-processed immediately.
+        # Idle trackers are also reset so a long pause doesn't immediately
+        # trip the task-done check on the very next poll cycle.
         self._dedup = DedupCache(window_s=self.cfg.dedup_window_s)
+        self._idle = IdleRegistry()
         self._wakeup.set()
-        self.log.info("paused=%s (dedup cleared)", self.paused.is_set())
+        self.log.info("paused=%s (dedup + idle cleared)", self.paused.is_set())
 
     def _clear_regions(self) -> None:
         self.cfg.regions = []
@@ -186,6 +207,12 @@ class App:
         if self._pick_window_requested.is_set():
             self._pick_window_requested.clear()
             self._run_window_picker()
+        if self._pick_session_requested.is_set():
+            self._pick_session_requested.clear()
+            self._run_session_picker()
+        if self._overlay_dirty.is_set():
+            self._overlay_dirty.clear()
+            self._refresh_overlay()
         self._window.root.after(150, self._schedule_pick_dispatch)
 
     def _schedule_worker_watchdog(self) -> None:
@@ -289,6 +316,46 @@ class App:
         )
         self._refresh_overlay()
 
+    def _run_session_picker(self) -> None:
+        """Pick a window, list goals, click on chat input — save WindowSession."""
+        from .session_picker import configure_session
+
+        assert self._capturer is not None
+        self.log.info("launching window-session picker")
+        if self._overlay:
+            self._overlay.clear()
+
+        # If sessions exist, default to editing the first matching one for
+        # the picked window; otherwise create new. configure_session does
+        # the matching itself when 'existing' is supplied.
+        try:
+            session = configure_session(parent=self._window.root)
+        except Exception as exc:  # noqa: BLE001
+            self.log.exception("session picker failed: %s", exc)
+            self._refresh_overlay()
+            return
+        finally:
+            pass
+
+        if session is None:
+            self.log.info("session picker cancelled")
+            self._refresh_overlay()
+            return
+
+        # Replace any existing session for the same title_match.
+        self.cfg.window_sessions = [
+            s for s in self.cfg.window_sessions
+            if s.title_match.lower() != session.title_match.lower()
+        ] + [session]
+        save_config(self.cfg)
+        # Reset idle state for this match — fresh session.
+        self._idle.forget(session.title_match)
+        self.log.info(
+            "saved session for %r: %d goal(s), idle_threshold=%.0fs",
+            session.title_match, len(session.goals), session.idle_threshold_s,
+        )
+        self._refresh_overlay()
+
     # ---- worker thread ---------------------------------------------------
     def _worker_loop(self) -> None:
         try:
@@ -336,23 +403,27 @@ class App:
                 # Drain any further sets so we don't burn CPU.
                 self._wakeup.clear()
 
-    def _iter_frames(self):
-        """Yield captured frames, foregrounding window-bound regions when armed.
+    def _tick(self) -> None:
+        """One poll cycle.
 
-        Regions are grouped by ``window_title_match``. When armed, each group
-        with a non-empty pattern triggers a ``bring_to_front`` before the
-        region is captured — so multiple VSCode windows on a single monitor
-        can each be checked. The previously-foreground window is restored
-        at the end via the generator's ``finally`` block.
+        Groups regions by their ``window_title_match`` so each window's
+        regions are captured back-to-back. Within a group:
+          1. (when armed) bring the window to the foreground;
+          2. OCR each region and run Yes/No detection (existing behaviour);
+          3. update the idle tracker with the concatenated OCR text;
+          4. if the window has a configured ``WindowSession`` that's
+             gone idle past its threshold, ask OpenAI whether the AI
+             has finished its goals and paste a follow-up message.
         """
-        assert self._capturer
+        assert self._capturer and self._ocr
         if not self.cfg.regions:
-            yield from self._capturer.grab_all()
+            for frame in self._capturer.grab_all():
+                lines = self._ocr.run(frame.image)
+                self._process_detection(frame, lines)
             return
 
         from .window import bring_to_front, find_window, get_foreground
 
-        # Stable group order = first-seen order in cfg.regions.
         groups: "dict[str | None, list]" = {}
         for region in self.cfg.regions:
             key = (region.window_title_match or "").strip() or None
@@ -367,6 +438,7 @@ class App:
 
         try:
             for pattern, regions in groups.items():
+                target = None
                 if pattern and switch_focus:
                     target = find_window(pattern)
                     if target is None:
@@ -376,11 +448,21 @@ class App:
                         )
                         continue
                     bring_to_front(target.hwnd)
+
+                window_text_parts: list[str] = []
                 for region in regions:
                     try:
-                        yield self._capturer.grab_region(region)
+                        frame = self._capturer.grab_region(region)
                     except ValueError:
                         continue
+                    lines = self._ocr.run(frame.image)
+                    if lines:
+                        window_text_parts.append("\n".join(ln.text for ln in lines))
+                    self._process_detection(frame, lines)
+
+                if pattern:
+                    visible_text = "\n\n".join(window_text_parts)
+                    self._maybe_run_task_check(pattern, visible_text)
         finally:
             if saved_fg_hwnd is not None:
                 try:
@@ -388,63 +470,129 @@ class App:
                 except Exception:
                     pass
 
-    def _tick(self) -> None:
-        assert self._capturer and self._ocr
-        frames_scanned = 0
-        detections = 0
-        for frame in self._iter_frames():
-            frames_scanned += 1
-            lines = self._ocr.run(frame.image)
-            if not lines:
-                continue
-            det = detect_prompt(lines, frame.monitor)
-            if det is None:
-                continue
-            detections += 1
+    def _process_detection(self, frame, lines) -> None:
+        if not lines:
+            return
+        det = detect_prompt(lines, frame.monitor)
+        if det is None:
+            return
 
-            if self._dedup.seen_recently(det.command_text, frame.monitor.index):
-                self.log.debug(
-                    "skipped: dedup hit on monitor %d (cmd=%r)",
-                    frame.monitor.index, _truncate(det.command_text, 80),
-                )
-                continue
-
-            cmd_short = _truncate(det.command_text)
-            self.log.info(
-                "detected [%s] on monitor %d: cmd=%r yes@(%d,%d)",
-                det.source, frame.monitor.index, cmd_short,
-                det.yes_click_x, det.yes_click_y,
+        if self._dedup.seen_recently(det.command_text, frame.monitor.index):
+            self.log.debug(
+                "skipped: dedup hit on monitor %d (cmd=%r)",
+                frame.monitor.index, _truncate(det.command_text, 80),
             )
-            if self._window:
-                self._window.set_status(last_detection=f"[{det.source}] {cmd_short}")
+            return
 
-            result = classify(det.command_text, self.cfg)
-            verdict = result.verdict
+        cmd_short = _truncate(det.command_text)
+        self.log.info(
+            "detected [%s] on monitor %d: cmd=%r yes@(%d,%d)",
+            det.source, frame.monitor.index, cmd_short,
+            det.yes_click_x, det.yes_click_y,
+        )
+        if self._window:
+            self._window.set_status(last_detection=f"[{det.source}] {cmd_short}")
+
+        result = classify(det.command_text, self.cfg)
+        verdict = result.verdict
+        self.log.info(
+            "classifier: safe=%s category=%s reason=%s%s",
+            verdict.safe, verdict.category, verdict.reason,
+            f" error={result.error}" if result.error else "",
+        )
+        if self._window:
+            v_label = f"{'OK' if verdict.safe else 'BLOCK'} · {verdict.category}"
+            self._window.set_status(last_verdict=v_label)
+
+        if not verdict.safe:
+            self.log.warning("BLOCKED: %s", verdict.reason)
+            return
+
+        if not self.armed.is_set():
+            self.log.info("WOULD CLICK (%d,%d) — dry-run", det.yes_click_x, det.yes_click_y)
+            return
+
+        if not self._cooldown.ready():
+            self.log.info("skipped click: cooldown active")
+            return
+
+        assert self._clicker
+        cr = self._clicker.click(det.yes_click_x, det.yes_click_y)
+        if cr.clicked:
+            self._cooldown.trigger()
+            self.log.info("CLICKED: %s", cr.reason)
+        else:
+            self.log.info("skipped click: %s", cr.reason)
+
+    def _maybe_run_task_check(self, title_match: str, visible_text: str) -> None:
+        """Update idle tracker for one window and act if the AI has gone quiet."""
+        session = next(
+            (s for s in list(self.cfg.window_sessions)
+             if s.title_match.lower() == title_match.lower() and not s.completed),
+            None,
+        )
+        if session is None:
+            return
+
+        st = self._idle.get(session.title_match)
+        changed = st.observe(visible_text)
+        if changed:
+            self.log.debug("window %r: text changed", session.title_match)
+            return
+
+        idle_for = st.idle_for()
+        if idle_for < session.idle_threshold_s:
+            return
+        if not st.can_act(session.cooldown_s):
+            return
+        if not self.armed.is_set():
             self.log.info(
-                "classifier: safe=%s category=%s reason=%s%s",
-                verdict.safe, verdict.category, verdict.reason,
-                f" error={result.error}" if result.error else "",
+                "window %r: idle %.0fs but dry-run — skipping task check",
+                session.title_match, idle_for,
             )
-            if self._window:
-                v_label = f"{'OK' if verdict.safe else 'BLOCK'} · {verdict.category}"
-                self._window.set_status(last_verdict=v_label)
+            return
 
-            if not verdict.safe:
-                self.log.warning("BLOCKED: %s", verdict.reason)
-                continue
+        self.log.info(
+            "window %r: idle %.0fs — running task-done check (goals=%d)",
+            session.title_match, idle_for, len(session.goals),
+        )
+        result = check_task_done(session.goals, visible_text, self.cfg)
+        verdict = result.verdict
+        self.log.info(
+            "task-check: status=%s reason=%s%s",
+            verdict.status, verdict.reason,
+            f" error={result.error}" if result.error else "",
+        )
 
-            if not self.armed.is_set():
-                self.log.info("WOULD CLICK (%d,%d) — dry-run", det.yes_click_x, det.yes_click_y)
-                continue
+        if verdict.status == "done":
+            self._send_to_window(_TASK_DONE_CONFIRM_TEXT, session)
+            session.completed = True
+            try:
+                save_config(self.cfg)
+            except Exception:
+                self.log.exception("failed to persist completed=True for %r", session.title_match)
+            self._overlay_dirty.set()
+            self.log.info("window %r marked completed", session.title_match)
+        elif verdict.status == "not_done":
+            self._send_to_window(_TASK_CONTINUE_TEXT, session)
+        else:
+            self.log.info("task-check: unknown — no action")
 
-            if not self._cooldown.ready():
-                self.log.info("skipped click: cooldown active")
-                continue
+        st.mark_acted()
 
-            assert self._clicker
-            cr = self._clicker.click(det.yes_click_x, det.yes_click_y)
-            if cr.clicked:
-                self._cooldown.trigger()
-                self.log.info("CLICKED: %s", cr.reason)
-            else:
-                self.log.info("skipped click: %s", cr.reason)
+    def _send_to_window(self, text: str, session: WindowSession) -> None:
+        """Click on the session's chat input and paste ``text`` + Enter."""
+        from .keyboard import type_and_submit
+
+        assert self._clicker
+        click_res = self._clicker.click(session.prompt_input_x, session.prompt_input_y)
+        if not click_res.clicked:
+            self.log.info("skipped task-action click: %s", click_res.reason)
+            return
+        # Brief settle so the chat input has focus before the paste.
+        time.sleep(0.10)
+        type_res = type_and_submit(text)
+        if type_res.sent:
+            self.log.info("sent to %r: %r (%s)", session.title_match, text, type_res.reason)
+        else:
+            self.log.warning("failed to send to %r: %s", session.title_match, type_res.reason)

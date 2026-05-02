@@ -18,6 +18,7 @@ dependencies = [
     "openai>=1.40",
     "pydantic>=2.6",
     "numpy>=1.26",
+    "pyperclip>=1.8",
 ]
 
 [project.optional-dependencies]

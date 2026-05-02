@@ -75,7 +75,6 @@ def classify(command_text: str, cfg: Config) -> ClassifyResult:
                     {"role": "user", "content": f"Command:\n```\n{command_text}\n```"},
                 ],
                 response_format=Verdict,
-                temperature=0,
             )
             verdict = resp.choices[0].message.parsed
             if verdict is None:

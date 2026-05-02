@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from .paths import config_path
 from .regions import Region
+from .sessions import WindowSession
 
 
 DEFAULT_MODEL = "gpt-5.4-nano-2026-03-17"
@@ -23,7 +24,9 @@ class Config(BaseModel):
     dedup_window_s: float = 5.0
     user_activity_radius_px: int = 50
     openai_timeout_s: float = 4.0
+    task_check_timeout_s: float = 8.0
     regions: List[Region] = Field(default_factory=list)
+    window_sessions: List[WindowSession] = Field(default_factory=list)
 
     def resolved_api_key(self) -> Optional[str]:
         return self.openai_api_key or os.environ.get("OPENAI_API_KEY")

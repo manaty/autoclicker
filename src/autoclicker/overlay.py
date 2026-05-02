@@ -3,6 +3,10 @@
 One Toplevel per region, transparent interior, lime outline, tiny "#N"
 label. On Windows the WS_EX_TRANSPARENT extended style is applied so
 mouse events fall through to the window underneath.
+
+Regions whose ``window_title_match`` corresponds to a *completed*
+``WindowSession`` are drawn in orange instead of lime — that's the user's
+visual cue that the autoclicker has stopped pinging that AI assistant.
 """
 from __future__ import annotations
 
@@ -11,9 +15,11 @@ from typing import List, Sequence
 
 from .capture import Monitor
 from .regions import Region
+from .sessions import WindowSession
 
 
-OUTLINE_COLOR = "#37f03c"
+OUTLINE_COLOR = "#37f03c"        # lime — region active
+COMPLETED_COLOR = "#ff9933"      # orange — session marked completed
 TRANSPARENT_KEY = "#010203"  # any unlikely RGB; Tk makes it see-through
 
 
@@ -22,14 +28,27 @@ class OverlayController:
         self._root = root
         self._windows: list = []
 
-    def set(self, regions: Sequence[Region], monitors: Sequence[Monitor]) -> None:
+    def set(
+        self,
+        regions: Sequence[Region],
+        monitors: Sequence[Monitor],
+        sessions: Sequence[WindowSession] = (),
+    ) -> None:
         self.clear()
         monitor_by_index = {m.index: m for m in monitors}
+        completed_matches = {
+            s.title_match.lower() for s in sessions if s.completed
+        }
         for i, region in enumerate(regions, start=1):
             mon = monitor_by_index.get(region.monitor_index)
             if mon is None:
                 continue
-            self._windows.append(self._build(i, region, mon))
+            is_completed = (
+                bool(region.window_title_match)
+                and region.window_title_match.lower() in completed_matches
+            )
+            color = COMPLETED_COLOR if is_completed else OUTLINE_COLOR
+            self._windows.append(self._build(i, region, mon, color))
 
     def clear(self) -> None:
         for w in self._windows:
@@ -39,7 +58,7 @@ class OverlayController:
                 pass
         self._windows = []
 
-    def _build(self, idx: int, region: Region, monitor: Monitor):
+    def _build(self, idx: int, region: Region, monitor: Monitor, color: str = OUTLINE_COLOR):
         import tkinter as tk
 
         win = tk.Toplevel(self._root)
@@ -62,11 +81,11 @@ class OverlayController:
         canvas.pack(fill="both", expand=True)
         canvas.create_rectangle(
             1, 1, region.w - 1, region.h - 1,
-            outline=OUTLINE_COLOR, width=2,
+            outline=color, width=2,
         )
         canvas.create_text(
             8, 6, text=f"#{idx}",
-            fill=OUTLINE_COLOR,
+            fill=color,
             anchor="nw",
             font=("Segoe UI", 10, "bold"),
         )
