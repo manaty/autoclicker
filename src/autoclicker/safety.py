@@ -84,6 +84,15 @@ def classify(command_text: str, cfg: Config) -> ClassifyResult:
             last_error = f"{model}: {exc}"
             continue
 
+    if getattr(cfg, "fail_open_on_api_error", False):
+        return ClassifyResult(
+            verdict=Verdict(
+                safe=True,
+                category="api-error-fail-open",
+                reason="classifier unreachable; fail-open per config",
+            ),
+            error=last_error,
+        )
     return ClassifyResult(
         verdict=Verdict(safe=False, category="api-error", reason="classifier unreachable; failing closed"),
         error=last_error,

@@ -24,6 +24,28 @@ def test_no_key_skips_ai_check(monkeypatch):
     assert result.verdict.category == "no-api-key"
 
 
+def test_api_error_fail_open_is_default(monkeypatch):
+    """API error on both models → fail open by default (click Yes anyway)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-bogus")
+    cfg = Config(model="not-a-real-model", model_fallback="also-fake", openai_timeout_s=2.0)
+    assert cfg.fail_open_on_api_error is True
+    result = classify("ls -la", cfg)
+    assert result.verdict.safe is True
+    assert result.verdict.category == "api-error-fail-open"
+    assert result.error is not None  # both attempts failed
+
+
+def test_api_error_fail_closed_when_disabled(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-bogus")
+    cfg = Config(
+        model="not-a-real-model", model_fallback="also-fake",
+        openai_timeout_s=2.0, fail_open_on_api_error=False,
+    )
+    result = classify("ls -la", cfg)
+    assert result.verdict.safe is False
+    assert result.verdict.category == "api-error"
+
+
 SAFE_COMMANDS = [
     "ls -la",
     "git status",

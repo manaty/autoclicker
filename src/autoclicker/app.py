@@ -576,6 +576,13 @@ class App:
             f" error={result.error}" if result.error else "",
         )
 
+        # API failure on both attempts → fail open if configured: send the
+        # "continue" prompt so the AI doesn't sit blocked behind a flaky API.
+        api_error_fail_open = (
+            result.error is not None
+            and getattr(self.cfg, "fail_open_on_api_error", False)
+        )
+
         if verdict.status == "done":
             self._send_to_window(_TASK_DONE_CONFIRM_TEXT, session)
             session.completed = True
@@ -585,7 +592,9 @@ class App:
                 self.log.exception("failed to persist completed=True for %r", session.title_match)
             self._overlay_dirty.set()
             self.log.info("window %r marked completed", session.title_match)
-        elif verdict.status == "not_done":
+        elif verdict.status == "not_done" or api_error_fail_open:
+            if api_error_fail_open:
+                self.log.warning("task-check API failed — sending continue (fail-open)")
             self._send_to_window(_TASK_CONTINUE_TEXT, session)
         else:
             self.log.info("task-check: unknown — no action")

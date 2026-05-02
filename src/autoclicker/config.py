@@ -25,6 +25,11 @@ class Config(BaseModel):
     user_activity_radius_px: int = 50
     openai_timeout_s: float = 4.0
     task_check_timeout_s: float = 8.0
+    # If True (default), API errors don't block the autoclicker:
+    #   - safety classifier → click Yes anyway (api-error-fail-open category).
+    #   - task-done check   → behave as 'not_done' (send the Continue prompt).
+    # Set to False to revert to fail-closed (safe but useless when API is flaky).
+    fail_open_on_api_error: bool = True
     regions: List[Region] = Field(default_factory=list)
     window_sessions: List[WindowSession] = Field(default_factory=list)
 
