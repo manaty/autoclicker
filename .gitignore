@@ -10,3 +10,9 @@ dist/
 *.spec
 .pytest_cache/
 tests/results/
+# Screenshots are local-only — they may contain machine paths or commands
+# that aren't appropriate for a public repo. Save them in tests/ to run
+# the OCR/detector smoke tests, but don't commit them.
+tests/*.png
+tests/*.jpg
+tests/*.jpeg

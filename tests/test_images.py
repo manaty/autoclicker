@@ -123,6 +123,11 @@ def _process(name: str) -> tuple[List[OcrLine], Detection | None]:
     return lines, det
 
 
+def _missing(name: str) -> bool:
+    return not (TESTS_DIR / name).exists()
+
+
+@pytest.mark.skipif(_missing("empty_image.png"), reason="empty_image.png not present (tracked images removed for public repo)")
 def test_empty_image_not_detected():
     _lines, det = _process("empty_image.png")
     assert det is None, "empty_image.png should produce no detection"
@@ -138,6 +143,8 @@ def test_empty_image_not_detected():
     ],
 )
 def test_yes_image_detected(name: str, expected_source: str):
+    if _missing(name):
+        pytest.skip(f"{name} not present (drop a fresh screenshot in tests/ to re-enable)")
     lines, det = _process(name)
     assert det is not None, f"{name} should produce a detection (lines={len(lines)})"
     assert det.yes_click_x > 0 and det.yes_click_y > 0
