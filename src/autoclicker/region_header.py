@@ -126,26 +126,32 @@ class RegionHeader:
         delete_btn = tk.Label(frame, text="✕", **btn_style)
         delete_btn.pack(side="right", padx=(0, 6))
         delete_btn.bind("<Button-1>", lambda _e: self._fire_delete())
+        _Tooltip(delete_btn, "Delete region")
 
         resize_btn = tk.Label(frame, text="⤢", **btn_style)
         resize_btn.pack(side="right")
         resize_btn.bind("<Button-1>", lambda _e: self._fire_resize())
+        _Tooltip(resize_btn, "Resize region — redraws the rectangle")
 
         # Pause / unpause toggle. ▶ when paused (click to resume), ⏸ when active.
         pause_glyph = "▶" if self._paused else "⏸"
+        pause_tip = "Resume monitoring this region" if self._paused else "Pause monitoring this region"
         pause_btn = tk.Label(frame, text=pause_glyph, **btn_style)
         pause_btn.pack(side="right")
         pause_btn.bind("<Button-1>", lambda _e: self._fire_pause())
+        _Tooltip(pause_btn, pause_tip)
 
         logs_btn = tk.Label(frame, text="👁", **btn_style)
         logs_btn.pack(side="right")
         logs_btn.bind("<Button-1>", lambda _e: self._fire_show_logs())
+        _Tooltip(logs_btn, "Show logs for this region (pauses while open)")
 
         # Edit only meaningful when the region is window-bound (has a session).
         if self._region.window_title_match:
             edit_btn = tk.Label(frame, text="✎", **btn_style)
             edit_btn.pack(side="right")
             edit_btn.bind("<Button-1>", lambda _e: self._fire_edit())
+            _Tooltip(edit_btn, "Edit session goals + chat-input position")
 
         # Marquee fills the remaining space — only when wide enough.
         if w >= TICKER_MIN_REGION_WIDTH:
@@ -272,3 +278,69 @@ class RegionHeader:
             except Exception:
                 pass
             self._win = None
+
+
+class _Tooltip:
+    """Minimal hover-tooltip for Tk widgets.
+
+    Tk has no built-in tooltip; this is the standard pattern: schedule a
+    Toplevel after a short hover delay, destroy it on leave/click.
+    """
+
+    _DELAY_MS = 350
+
+    def __init__(self, widget, text: str) -> None:
+        self._widget = widget
+        self._text = text
+        self._tip = None
+        self._after_id = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        try:
+            self._after_id = self._widget.after(self._DELAY_MS, self._show)
+        except Exception:
+            self._after_id = None
+
+    def _show(self) -> None:
+        import tkinter as tk
+
+        if self._tip is not None:
+            return
+        try:
+            x = self._widget.winfo_rootx() + 12
+            y = self._widget.winfo_rooty() + self._widget.winfo_height() + 4
+        except Exception:
+            return
+        tip = tk.Toplevel(self._widget)
+        tip.overrideredirect(True)
+        tip.attributes("-topmost", True)
+        tip.geometry(f"+{x}+{y}")
+        tk.Label(
+            tip, text=self._text,
+            bg="#222", fg="#eee",
+            font=("Segoe UI", 9),
+            padx=6, pady=2,
+            relief="solid", bd=1,
+        ).pack()
+        self._tip = tip
+
+    def _hide(self, _event=None) -> None:
+        self._cancel()
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
+            self._tip = None
+
+    def _cancel(self) -> None:
+        if self._after_id is not None:
+            try:
+                self._widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
