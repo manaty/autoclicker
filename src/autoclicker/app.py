@@ -556,6 +556,46 @@ class App:
                 except Exception:
                     pass
 
+    def _log_missed_detection(self, lines, ticker_key: str) -> None:
+        """When OCR has text but no Yes/No prompt was extracted, point at why.
+
+        Throttled per region: at most one diagnostic every 60s, and only
+        when the OCR seems to be looking at *something* prompt-shaped
+        (mentions of "allow", "yes", "no", or a Codex anchor).
+        """
+        from .detect import (
+            CLAUDE_HEADER_RE, YES_RE, CLAUDE_NO_RE, CODEX_ANCHOR_RE,
+        )
+        now = time.monotonic()
+        diag_key = ticker_key + "::diag"
+        last = self._last_heartbeat_at.get(diag_key, 0.0)
+        if now - last < 60.0:
+            return
+
+        joined = "\n".join(ln.text for ln in lines if ln.text)
+        if not joined:
+            return
+        has_header = bool(CLAUDE_HEADER_RE.search(joined))
+        has_yes = any(YES_RE.match(ln.text.strip()) for ln in lines)
+        has_no = any(CLAUDE_NO_RE.match(ln.text.strip()) for ln in lines)
+        has_codex = bool(CODEX_ANCHOR_RE.search(joined))
+
+        # Only log if at least one prompt-shaped marker is present —
+        # otherwise we'd flood every chat the autoclicker watches.
+        if not (has_header or has_codex or (has_yes and has_no)):
+            return
+
+        self._last_heartbeat_at[diag_key] = now
+        bits = []
+        bits.append(f"header={'✓' if has_header else '✗'}")
+        bits.append(f"yes={'✓' if has_yes else '✗'}")
+        bits.append(f"no={'✓' if has_no else '✗'}")
+        if has_codex:
+            bits.append("codex-anchor=✓")
+        msg = f"prompt-shaped but not detected ({', '.join(bits)})"
+        self.log.info("%s for ticker_key=%r", msg, ticker_key)
+        self._ticker.add(msg, key=ticker_key)
+
     def _maybe_emit_heartbeat(self, ticker_key: str, lines) -> None:
         """Drop a 'scanned' breadcrumb on the region's marquee at most every 30s.
 
@@ -576,6 +616,7 @@ class App:
             return
         det = detect_prompt(lines, frame.monitor)
         if det is None:
+            self._log_missed_detection(lines, ticker_key)
             return
 
         if self._dedup.seen_recently(det.command_text, frame.monitor.index):
