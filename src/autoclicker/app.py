@@ -558,6 +558,12 @@ class App:
             if fg is not None:
                 saved_fg_hwnd = fg.hwnd
 
+        # Map every region to its cfg index so unbound regions get a stable
+        # per-region ticker key (#1, #2, …) instead of all sharing the global
+        # stream. Window-bound regions still share their window's key — that's
+        # the design intent (one window's events on one ticker).
+        cfg_idx_by_id = {id(r): i for i, r in enumerate(self.cfg.regions)}
+
         try:
             for pattern, regions in groups.items():
                 target = None
@@ -572,7 +578,6 @@ class App:
                     bring_to_front(target.hwnd)
 
                 window_text_parts: list[str] = []
-                ticker_key = pattern or ""
                 for region in regions:
                     try:
                         frame = self._capturer.grab_region(region)
@@ -581,6 +586,8 @@ class App:
                     lines = self._ocr.run(frame.image)
                     if lines:
                         window_text_parts.append("\n".join(ln.text for ln in lines))
+                    cfg_idx = cfg_idx_by_id.get(id(region), 0)
+                    ticker_key = pattern or f"region_{cfg_idx}"
                     self._process_detection(frame, lines, ticker_key=ticker_key)
 
                 if pattern:

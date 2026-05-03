@@ -34,6 +34,7 @@ class RegionHeader:
         region: Region,
         monitor: Monitor,
         ticker: LogTicker,
+        ticker_key: str,
         on_edit: Optional[Callable[[int], None]] = None,
         on_resize: Optional[Callable[[int], None]] = None,
         on_delete: Optional[Callable[[int], None]] = None,
@@ -44,6 +45,7 @@ class RegionHeader:
         self._region = region
         self._monitor = monitor
         self._ticker = ticker
+        self._ticker_key = ticker_key
         self._on_edit = on_edit
         self._on_resize = on_resize
         self._on_delete = on_delete
@@ -169,8 +171,9 @@ class RegionHeader:
     def _refresh_marquee_text(self) -> None:
         if self._marquee_canvas is None or self._marquee_text_id is None:
             return
-        key = self._region.window_title_match or ""
-        text = self._ticker.text_for(key=key, fallback_global=True) or "—"
+        # Show this region's events only — fall back to global only when
+        # we have nothing region-specific yet.
+        text = self._ticker.text_for(key=self._ticker_key, fallback_global=True) or "—"
         if text != self._marquee_text:
             self._marquee_text = text
             self._marquee_canvas.itemconfig(self._marquee_text_id, text=text)

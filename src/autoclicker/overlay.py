@@ -68,12 +68,16 @@ class OverlayController:
                 # Region indices are 1-based for display; convert to the 0-based
                 # cfg.regions index that the App handlers operate on.
                 cfg_idx = i - 1
+                # Match the worker's per-region key when there's no window match,
+                # so each unbound region gets its own marquee.
+                ticker_key = region.window_title_match or f"region_{cfg_idx}"
                 header = RegionHeader(
                     self._root,
                     idx=i,
                     region=region,
                     monitor=mon,
                     ticker=self._ticker,
+                    ticker_key=ticker_key,
                     on_edit=(lambda _i, c=cfg_idx: self._on_edit(c)) if self._on_edit else None,
                     on_resize=(lambda _i, c=cfg_idx: self._on_resize(c)) if self._on_resize else None,
                     on_delete=(lambda _i, c=cfg_idx: self._on_delete(c)) if self._on_delete else None,
