@@ -1,19 +1,22 @@
 """Always-on-top click-through rectangles outlining monitored regions.
 
-One Toplevel per region, transparent interior, lime outline, tiny "#N"
-label. On Windows the WS_EX_TRANSPARENT extended style is applied so
-mouse events fall through to the window underneath.
+Two Toplevels per region:
+  - the rectangle: click-through, just an outline + "#N" label.
+  - the header strip: not click-through, hosts the marquee log + the
+    edit / resize / delete buttons (see :mod:`region_header`).
 
 Regions whose ``window_title_match`` corresponds to a *completed*
-``WindowSession`` are drawn in orange instead of lime — that's the user's
-visual cue that the autoclicker has stopped pinging that AI assistant.
+``WindowSession`` are drawn in orange instead of lime — that's the
+user's cue that the autoclicker has stopped pinging that AI.
 """
 from __future__ import annotations
 
 import sys
-from typing import List, Sequence
+from typing import Callable, List, Optional, Sequence
 
 from .capture import Monitor
+from .log_ticker import LogTicker
+from .region_header import RegionHeader
 from .regions import Region
 from .sessions import WindowSession
 
@@ -24,9 +27,21 @@ TRANSPARENT_KEY = "#010203"  # any unlikely RGB; Tk makes it see-through
 
 
 class OverlayController:
-    def __init__(self, root) -> None:
+    def __init__(
+        self,
+        root,
+        ticker: Optional[LogTicker] = None,
+        on_edit: Optional[Callable[[int], None]] = None,
+        on_resize: Optional[Callable[[int], None]] = None,
+        on_delete: Optional[Callable[[int], None]] = None,
+    ) -> None:
         self._root = root
+        self._ticker = ticker
+        self._on_edit = on_edit
+        self._on_resize = on_resize
+        self._on_delete = on_delete
         self._windows: list = []
+        self._headers: list[RegionHeader] = []
 
     def set(
         self,
@@ -49,6 +64,22 @@ class OverlayController:
             )
             color = COMPLETED_COLOR if is_completed else OUTLINE_COLOR
             self._windows.append(self._build(i, region, mon, color))
+            if self._ticker is not None:
+                # Region indices are 1-based for display; convert to the 0-based
+                # cfg.regions index that the App handlers operate on.
+                cfg_idx = i - 1
+                header = RegionHeader(
+                    self._root,
+                    idx=i,
+                    region=region,
+                    monitor=mon,
+                    ticker=self._ticker,
+                    on_edit=(lambda _i, c=cfg_idx: self._on_edit(c)) if self._on_edit else None,
+                    on_resize=(lambda _i, c=cfg_idx: self._on_resize(c)) if self._on_resize else None,
+                    on_delete=(lambda _i, c=cfg_idx: self._on_delete(c)) if self._on_delete else None,
+                    completed=is_completed,
+                )
+                self._headers.append(header)
 
     def clear(self) -> None:
         for w in self._windows:
@@ -57,6 +88,12 @@ class OverlayController:
             except Exception:
                 pass
         self._windows = []
+        for h in self._headers:
+            try:
+                h.destroy()
+            except Exception:
+                pass
+        self._headers = []
 
     def _build(self, idx: int, region: Region, monitor: Monitor, color: str = OUTLINE_COLOR):
         import tkinter as tk

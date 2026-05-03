@@ -7,6 +7,7 @@ from .config import Config, load_config, save_config
 from .control_window import ControlWindow
 from .detect import detect_prompt
 from .idle import IdleRegistry
+from .log_ticker import LogTicker
 from .logging_setup import setup_logging
 from .ocr import Ocr
 from .overlay import OverlayController
@@ -52,6 +53,11 @@ class App:
         self._idle = IdleRegistry()
         self._pick_session_requested = threading.Event()
         self._overlay_dirty = threading.Event()
+        self._ticker = LogTicker()
+        # Per-region action requests fired from header buttons (Tk thread).
+        # The Tk poll loop drains these and runs the matching handler.
+        self._region_actions: list[tuple[str, int]] = []
+        self._region_actions_lock = threading.Lock()
 
         self._window: ControlWindow | None = None
         self._overlay: OverlayController | None = None
@@ -91,7 +97,13 @@ class App:
         # Ensure runtime (capture + OCR) lazily on the worker, but we need
         # monitors now for overlays.
         self._ensure_capturer()
-        self._overlay = OverlayController(self._window.root)
+        self._overlay = OverlayController(
+            self._window.root,
+            ticker=self._ticker,
+            on_edit=self._on_region_edit,
+            on_resize=self._on_region_resize,
+            on_delete=self._on_region_delete,
+        )
         self._refresh_overlay()
 
         self._start_worker()
@@ -171,6 +183,104 @@ class App:
 
     def _request_pick_session(self) -> None:
         self._pick_session_requested.set()
+
+    # ---- per-region header actions (Tk thread) ---------------------------
+    def _on_region_edit(self, cfg_idx: int) -> None:
+        """Open the goals editor for the session bound to this region."""
+        if cfg_idx < 0 or cfg_idx >= len(self.cfg.regions):
+            return
+        region = self.cfg.regions[cfg_idx]
+        match = (region.window_title_match or "").strip()
+        if not match:
+            self.log.info("region #%d has no window_title_match — nothing to edit", cfg_idx + 1)
+            return
+
+        # Reuse the standard session-picker flow, scoped to this region's match.
+        from .session_picker import configure_session
+        if self._overlay:
+            self._overlay.clear()
+        try:
+            session = configure_session(
+                parent=self._window.root,
+                available_matches=[match],
+                existing_sessions=list(self.cfg.window_sessions),
+            )
+        except Exception:
+            self.log.exception("region edit picker failed")
+            self._refresh_overlay()
+            return
+
+        if session is None:
+            self._refresh_overlay()
+            return
+
+        self.cfg.window_sessions = [
+            s for s in self.cfg.window_sessions
+            if s.title_match.lower() != session.title_match.lower()
+        ] + [session]
+        save_config(self.cfg)
+        self._idle.forget(session.title_match)
+        self.log.info("region #%d: session updated (%d goals)", cfg_idx + 1, len(session.goals))
+        self._refresh_overlay()
+
+    def _on_region_resize(self, cfg_idx: int) -> None:
+        """Re-pick this region's rectangle on its monitor; preserve title_match."""
+        from .region_picker import pick_regions
+        if cfg_idx < 0 or cfg_idx >= len(self.cfg.regions):
+            return
+        old = self.cfg.regions[cfg_idx]
+
+        if self._overlay:
+            self._overlay.clear()
+        try:
+            picked = pick_regions(
+                self._capturer.monitors,
+                parent=self._window.root,
+                only_monitor_index=old.monitor_index,
+                window_title_match=old.window_title_match,
+                hint_suffix=f"resize region #{cfg_idx + 1}"
+                + (f" — {old.window_title_match}" if old.window_title_match else ""),
+            )
+        finally:
+            self._refresh_overlay()
+
+        if not picked:
+            self.log.info("resize cancelled for region #%d", cfg_idx + 1)
+            return
+        # We replace the existing region with the *first* drawn rectangle;
+        # if the user drew several, they're appended.
+        new_first, *extras = picked
+        self.cfg.regions[cfg_idx] = new_first
+        self.cfg.regions = self.cfg.regions + list(extras)
+        save_config(self.cfg)
+        self.log.info(
+            "region #%d resized: %dx%d at (%d,%d) on monitor %d",
+            cfg_idx + 1, new_first.w, new_first.h, new_first.x, new_first.y,
+            new_first.monitor_index,
+        )
+        self._refresh_overlay()
+
+    def _on_region_delete(self, cfg_idx: int) -> None:
+        """Remove a region after confirmation."""
+        from tkinter import messagebox
+        if cfg_idx < 0 or cfg_idx >= len(self.cfg.regions):
+            return
+        region = self.cfg.regions[cfg_idx]
+        label = f"region #{cfg_idx + 1}"
+        if region.window_title_match:
+            label += f" ({region.window_title_match})"
+        if not messagebox.askyesno(
+            "Delete region?",
+            f"Remove {label}?",
+            parent=self._window.root,
+        ):
+            return
+        self.cfg.regions = [
+            r for i, r in enumerate(self.cfg.regions) if i != cfg_idx
+        ]
+        save_config(self.cfg)
+        self.log.info("deleted %s", label)
+        self._refresh_overlay()
 
     def _on_arm_toggle(self) -> None:
         """Called from the control window whenever armed state flips.
@@ -431,7 +541,7 @@ class App:
         if not self.cfg.regions:
             for frame in self._capturer.grab_all():
                 lines = self._ocr.run(frame.image)
-                self._process_detection(frame, lines)
+                self._process_detection(frame, lines, ticker_key="")
             return
 
         from .window import bring_to_front, find_window, get_foreground
@@ -462,6 +572,7 @@ class App:
                     bring_to_front(target.hwnd)
 
                 window_text_parts: list[str] = []
+                ticker_key = pattern or ""
                 for region in regions:
                     try:
                         frame = self._capturer.grab_region(region)
@@ -470,7 +581,7 @@ class App:
                     lines = self._ocr.run(frame.image)
                     if lines:
                         window_text_parts.append("\n".join(ln.text for ln in lines))
-                    self._process_detection(frame, lines)
+                    self._process_detection(frame, lines, ticker_key=ticker_key)
 
                 if pattern:
                     visible_text = "\n\n".join(window_text_parts)
@@ -482,7 +593,7 @@ class App:
                 except Exception:
                     pass
 
-    def _process_detection(self, frame, lines) -> None:
+    def _process_detection(self, frame, lines, ticker_key: str = "") -> None:
         if not lines:
             return
         det = detect_prompt(lines, frame.monitor)
@@ -502,6 +613,7 @@ class App:
             det.source, frame.monitor.index, cmd_short,
             det.yes_click_x, det.yes_click_y,
         )
+        self._ticker.add(f"detected [{det.source}]: {_truncate(det.command_text, 60)}", key=ticker_key)
         if self._window:
             self._window.set_status(last_detection=f"[{det.source}] {cmd_short}")
 
@@ -518,10 +630,12 @@ class App:
 
         if not verdict.safe:
             self.log.warning("BLOCKED: %s", verdict.reason)
+            self._ticker.add(f"BLOCKED · {verdict.category}", key=ticker_key)
             return
 
         if not self.armed.is_set():
             self.log.info("WOULD CLICK (%d,%d) — dry-run", det.yes_click_x, det.yes_click_y)
+            self._ticker.add("would click (dry-run)", key=ticker_key)
             return
 
         if not self._cooldown.ready():
@@ -533,8 +647,10 @@ class App:
         if cr.clicked:
             self._cooldown.trigger()
             self.log.info("CLICKED: %s", cr.reason)
+            self._ticker.add(f"clicked Yes · {verdict.category}", key=ticker_key)
         else:
             self.log.info("skipped click: %s", cr.reason)
+            self._ticker.add(f"skipped click: {cr.reason}", key=ticker_key)
 
     def _maybe_run_task_check(self, title_match: str, visible_text: str) -> None:
         """Update idle tracker for one window and act if the AI has gone quiet."""
@@ -583,6 +699,7 @@ class App:
             and getattr(self.cfg, "fail_open_on_api_error", False)
         )
 
+        ticker_key = session.title_match
         if verdict.status == "done":
             self._send_to_window(_TASK_DONE_CONFIRM_TEXT, session)
             session.completed = True
@@ -592,12 +709,19 @@ class App:
                 self.log.exception("failed to persist completed=True for %r", session.title_match)
             self._overlay_dirty.set()
             self.log.info("window %r marked completed", session.title_match)
+            self._ticker.add("DONE — asked confirmation, session parked", key=ticker_key)
         elif verdict.status == "not_done" or api_error_fail_open:
             if api_error_fail_open:
                 self.log.warning("task-check API failed — sending continue (fail-open)")
             self._send_to_window(_TASK_CONTINUE_TEXT, session)
+            self._ticker.add(
+                "API failed — sent continue (fail-open)" if api_error_fail_open
+                else "not_done — sent continue prompt",
+                key=ticker_key,
+            )
         else:
             self.log.info("task-check: unknown — no action")
+            self._ticker.add("idle but task status unknown — no action", key=ticker_key)
 
         st.mark_acted()
 
