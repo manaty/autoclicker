@@ -54,6 +54,9 @@ class App:
         self._idle = IdleRegistry()
         self._overlay_dirty = threading.Event()
         self._ticker = LogTicker()
+        # Per-region "scanned" heartbeats are throttled to avoid spam:
+        # one entry every ~30s of polling unless something interesting fires.
+        self._last_heartbeat_at: dict[str, float] = {}
         # Per-region pause state. Manual = user clicked the ⏸ icon. Logs-open
         # = the user has the logs panel up; we auto-pause monitoring while
         # they read so the ticker doesn't keep mutating under their eyes.
@@ -541,6 +544,7 @@ class App:
                         window_text_parts.append("\n".join(ln.text for ln in lines))
                     ticker_key = pattern or f"region_{cfg_idx}"
                     self._process_detection(frame, lines, ticker_key=ticker_key)
+                    self._maybe_emit_heartbeat(ticker_key, lines)
 
                 if pattern:
                     visible_text = "\n\n".join(window_text_parts)
@@ -551,6 +555,21 @@ class App:
                     bring_to_front(saved_fg_hwnd, settle_s=0.0)
                 except Exception:
                     pass
+
+    def _maybe_emit_heartbeat(self, ticker_key: str, lines) -> None:
+        """Drop a 'scanned' breadcrumb on the region's marquee at most every 30s.
+
+        Without this, regions that never see a Yes/No prompt show
+        'no events yet' forever — which is correct but unhelpful when
+        you just want to confirm OCR is reading the window.
+        """
+        now = time.monotonic()
+        last = self._last_heartbeat_at.get(ticker_key, 0.0)
+        if now - last < 30.0:
+            return
+        self._last_heartbeat_at[ticker_key] = now
+        n = len(lines) if lines else 0
+        self._ticker.add(f"scanned: {n} OCR line(s)", key=ticker_key)
 
     def _process_detection(self, frame, lines, ticker_key: str = "") -> None:
         if not lines:

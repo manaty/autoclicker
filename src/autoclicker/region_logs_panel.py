@@ -111,7 +111,8 @@ class RegionLogsPanel:
     def _refresh(self) -> None:
         if self._text is None:
             return
-        entries = self._ticker.lines_for(key=self._ticker_key, fallback_global=True)
+        # Region-specific only — the panel is per-region, no global mix-in.
+        entries = self._ticker.lines_for(key=self._ticker_key, fallback_global=False)
         if len(entries) == self._last_count:
             return
         self._last_count = len(entries)
