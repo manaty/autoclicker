@@ -27,6 +27,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      - name: Stamp version into _version.py
+        shell: pwsh
+        run: |
+          if ("${{ github.ref }}".StartsWith("refs/tags/v")) {
+            $version = "${{ github.ref_name }}".TrimStart("v")
+          } else {
+            $sha = "${{ github.sha }}".Substring(0, 7)
+            $version = "0.0.0-dev+$sha"
+          }
+          $payload = "__version__ = '$version'`n"
+          Set-Content -Path src/autoclicker/_version.py -Value $payload -Encoding utf8
+          Write-Host "stamped $version into _version.py"
+
       - name: Build exe
         shell: pwsh
         run: |

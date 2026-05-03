@@ -34,6 +34,9 @@ class Status:
     region_count: int = 0
     last_detection: str = ""
     last_verdict: str = ""
+    version: str = ""
+    update_tag: str = ""        # set when a newer release is found
+    update_message: str = ""    # short status line shown next to the button
 
 
 class ControlWindow:
@@ -41,9 +44,11 @@ class ControlWindow:
         self,
         on_quit: Callable[[], None],
         on_pick_window_region: Optional[Callable[[], None]] = None,
+        on_install_update: Optional[Callable[[], None]] = None,
     ) -> None:
         self._on_quit = on_quit
         self._on_pick_window_region = on_pick_window_region
+        self._on_install_update = on_install_update
         self._status = Status()
         self._status_lock = threading.Lock()
         self._status_dirty = threading.Event()
@@ -85,6 +90,19 @@ class ControlWindow:
         btn_frame.pack(fill="x", **pad)
         ttk.Button(btn_frame, text="Add window region", command=self._pick_window).pack(fill="x", pady=2)
 
+        # Update banner — hidden until an update is found.
+        self._update_frame = tk.Frame(root, bg="#37b24d")
+        self._update_label = tk.Label(
+            self._update_frame, text="", bg="#37b24d", fg="white",
+            font=("Segoe UI", 9, "bold"), anchor="w", padx=8,
+        )
+        self._update_label.pack(side="left", fill="x", expand=True)
+        self._update_btn = ttk.Button(
+            self._update_frame, text="Install", command=self._install_update, width=10,
+        )
+        self._update_btn.pack(side="right", padx=4, pady=2)
+        # Don't pack the banner yet — _refresh() decides.
+
         bottom = tk.Frame(root)
         bottom.pack(fill="x", **pad, side="bottom")
         ttk.Button(bottom, text="Config", command=self._open_config, width=10).pack(side="left", padx=2)
@@ -108,6 +126,10 @@ class ControlWindow:
     def _pick_window(self) -> None:
         if self._on_pick_window_region is not None:
             self._on_pick_window_region()
+
+    def _install_update(self) -> None:
+        if self._on_install_update is not None:
+            self._on_install_update()
 
     def _quit(self) -> None:
         self._on_quit()
@@ -146,12 +168,23 @@ class ControlWindow:
         with self._status_lock:
             st = Status(**self._status.__dict__)
 
-        info = [
-            f"regions: {st.region_count or 0}",
-            f"AI check: {'on' if st.ai_check else 'OFF (no OPENAI_API_KEY)'}",
-        ]
+        info = []
+        if st.version:
+            info.append(f"version: {st.version}")
+        info.append(f"regions: {st.region_count or 0}")
+        info.append(f"AI check: {'on' if st.ai_check else 'OFF (no OPENAI_API_KEY)'}")
         if st.last_detection:
             info.append(f"last: {st.last_detection}")
         if st.last_verdict:
             info.append(f"verdict: {st.last_verdict}")
         self._info_label.config(text="\n".join(info))
+
+        # Show / hide the update banner.
+        if st.update_tag:
+            label_text = st.update_message or f"Update available: {st.update_tag}"
+            self._update_label.config(text=label_text)
+            if not self._update_frame.winfo_ismapped():
+                self._update_frame.pack(fill="x", before=self._info_label)
+        else:
+            if self._update_frame.winfo_ismapped():
+                self._update_frame.pack_forget()

@@ -1,6 +1,7 @@
 import threading
 import time
 
+from . import updater
 from .capture import ScreenCapturer
 from .click import Clicker
 from .config import Config, load_config, save_config
@@ -64,6 +65,7 @@ class App:
         self._logs_open_regions: set[int] = set()
         self._pause_lock = threading.Lock()
         self._open_logs_panels: dict = {}  # cfg_idx -> RegionLogsPanel
+        self._available_update: updater.ReleaseInfo | None = None
 
         self._window: ControlWindow | None = None
         self._overlay: OverlayController | None = None
@@ -84,11 +86,13 @@ class App:
         self._window = ControlWindow(
             on_quit=self.stop,
             on_pick_window_region=self._request_pick_window,
+            on_install_update=self._install_update,
         )
         self._window.build()
         self._window.set_status(
             ai_check=bool(self.cfg.resolved_api_key()),
             region_count=len(self.cfg.regions),
+            version=updater.current_version(),
         )
 
         # Ensure runtime (capture + OCR) lazily on the worker, but we need
@@ -111,6 +115,9 @@ class App:
         self._schedule_pick_dispatch()
         # Worker watchdog — surface a dead worker in the UI and try to restart.
         self._schedule_worker_watchdog()
+
+        # Background update check — non-blocking; result piped into status bar.
+        self._schedule_update_check()
 
         try:
             self._window.run()
@@ -364,6 +371,66 @@ class App:
     def _start_worker(self) -> None:
         self._worker = threading.Thread(target=self._worker_loop, name="detect", daemon=True)
         self._worker.start()
+
+    # ---- update check ----------------------------------------------------
+    def _schedule_update_check(self) -> None:
+        """Kick off a background update check ~5 s after launch.
+
+        Re-runs every hour as long as the app stays open — the user might
+        leave it running for days while a new release lands.
+        """
+        if self._window is None or self._window.root is None:
+            return
+
+        def _on_result(info):
+            try:
+                if info is None:
+                    return
+                self._available_update = info
+                cur = updater.current_version()
+                msg = f"Update {info.tag} available (you're on {cur})"
+                self.log.info(msg)
+                if self._window:
+                    self._window.set_status(
+                        update_tag=info.tag,
+                        update_message=msg,
+                    )
+                self._ticker.add(msg)
+            except Exception:
+                self.log.exception("update result handler failed")
+
+        try:
+            updater.check_async(_on_result)
+        except Exception:
+            self.log.exception("update check spawn failed")
+        # Schedule the next one in 1 h.
+        self._window.root.after(60 * 60 * 1000, self._schedule_update_check)
+
+    def _install_update(self) -> None:
+        info = self._available_update
+        if info is None:
+            return
+        if self._window:
+            self._window.set_status(update_message=f"Downloading {info.tag}…")
+        self.log.info("downloading update %s from %s", info.tag, info.asset_url)
+
+        def run() -> None:
+            try:
+                msg = updater.download_and_apply(info)
+            except Exception as exc:  # noqa: BLE001
+                msg = f"update failed: {exc}"
+                self.log.exception("update apply failed: %s", exc)
+            self.log.info("updater: %s", msg)
+            if self._window:
+                self._window.set_status(update_message=msg)
+            if "queued" in msg:
+                # Give the bat ~1 s to spawn, then quit so it can swap us.
+                self.stop_event.set()
+                self._wakeup.set()
+                if self._window and self._window.root:
+                    self._window.root.after(1500, self._window._quit)
+
+        threading.Thread(target=run, name="updater-apply", daemon=True).start()
 
     def _run_window_picker(self) -> None:
         """Pick a window, foreground it, then draw region(s) on its monitor."""
