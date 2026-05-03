@@ -19,11 +19,14 @@ from .regions import Region
 HEADER_HEIGHT = 24
 TICKER_MIN_REGION_WIDTH = 250  # below this, hide the marquee, keep buttons.
 
-# Colors mirror overlay.py — green for active, orange for completed sessions.
+# Colors mirror overlay.py — green for active, orange for completed sessions,
+# grey when manually paused.
 ACTIVE_BG = "#1a2b1a"
 ACTIVE_FG = "#37f03c"
 COMPLETED_BG = "#2b1f0e"
 COMPLETED_FG = "#ff9933"
+PAUSED_BG = "#222"
+PAUSED_FG = "#888"
 
 
 class RegionHeader:
@@ -38,7 +41,10 @@ class RegionHeader:
         on_edit: Optional[Callable[[int], None]] = None,
         on_resize: Optional[Callable[[int], None]] = None,
         on_delete: Optional[Callable[[int], None]] = None,
+        on_toggle_pause: Optional[Callable[[int], None]] = None,
+        on_show_logs: Optional[Callable[[int], None]] = None,
         completed: bool = False,
+        paused: bool = False,
     ) -> None:
         self._root = root
         self._idx = idx
@@ -49,7 +55,10 @@ class RegionHeader:
         self._on_edit = on_edit
         self._on_resize = on_resize
         self._on_delete = on_delete
+        self._on_toggle_pause = on_toggle_pause
+        self._on_show_logs = on_show_logs
         self._completed = completed
+        self._paused = paused
 
         self._win = None
         self._marquee_canvas = None
@@ -76,8 +85,12 @@ class RegionHeader:
         from tkinter import ttk
 
         gx, gy, w = self._placement()
-        bg = COMPLETED_BG if self._completed else ACTIVE_BG
-        fg = COMPLETED_FG if self._completed else ACTIVE_FG
+        if self._paused:
+            bg, fg = PAUSED_BG, PAUSED_FG
+        elif self._completed:
+            bg, fg = COMPLETED_BG, COMPLETED_FG
+        else:
+            bg, fg = ACTIVE_BG, ACTIVE_FG
 
         win = tk.Toplevel(self._root)
         win.overrideredirect(True)
@@ -117,6 +130,16 @@ class RegionHeader:
         resize_btn = tk.Label(frame, text="⤢", **btn_style)
         resize_btn.pack(side="right")
         resize_btn.bind("<Button-1>", lambda _e: self._fire_resize())
+
+        # Pause / unpause toggle. ▶ when paused (click to resume), ⏸ when active.
+        pause_glyph = "▶" if self._paused else "⏸"
+        pause_btn = tk.Label(frame, text=pause_glyph, **btn_style)
+        pause_btn.pack(side="right")
+        pause_btn.bind("<Button-1>", lambda _e: self._fire_pause())
+
+        logs_btn = tk.Label(frame, text="👁", **btn_style)
+        logs_btn.pack(side="right")
+        logs_btn.bind("<Button-1>", lambda _e: self._fire_show_logs())
 
         # Edit only meaningful when the region is window-bound (has a session).
         if self._region.window_title_match:
@@ -218,6 +241,20 @@ class RegionHeader:
         if self._on_delete is not None:
             try:
                 self._on_delete(self._idx)
+            except Exception:
+                pass
+
+    def _fire_pause(self) -> None:
+        if self._on_toggle_pause is not None:
+            try:
+                self._on_toggle_pause(self._idx)
+            except Exception:
+                pass
+
+    def _fire_show_logs(self) -> None:
+        if self._on_show_logs is not None:
+            try:
+                self._on_show_logs(self._idx)
             except Exception:
                 pass
 

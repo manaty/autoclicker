@@ -34,14 +34,34 @@ def test_no_fallback_returns_empty():
     assert t.text_for(key="UnknownWindow", fallback_global=False) == ""
 
 
-def test_max_per_key_eviction():
-    t = LogTicker(max_per_key=3)
-    for i in range(10):
-        t.add(f"msg{i}", key="x")
+def test_max_per_key_byte_eviction():
+    """The per-key buffer is capped by *bytes* — old entries drop first."""
+    t = LogTicker(max_per_key_bytes=200)  # ~3-4 short messages
+    for i in range(20):
+        t.add(f"long-message-{i:02d} with extra words", key="x")
     text = t.text_for(key="x", fallback_global=False)
-    # Only the last 3 should remain.
-    assert "msg7" in text and "msg8" in text and "msg9" in text
-    assert "msg0" not in text and "msg6" not in text
+    # Most recent should be kept.
+    assert "long-message-19" in text
+    # Earliest should be evicted under the byte cap.
+    assert "long-message-00" not in text
+
+
+def test_size_for_tracks_bytes():
+    t = LogTicker()
+    assert t.size_for(key="x") == 0
+    t.add("hello", key="x")
+    assert t.size_for(key="x") > 0
+
+
+def test_lines_for_returns_timestamped_entries():
+    t = LogTicker()
+    t.add("first", key="x")
+    t.add("second", key="x")
+    entries = t.lines_for(key="x", fallback_global=False)
+    assert len(entries) == 2
+    assert entries[0][1] == "first"
+    assert entries[1][1] == "second"
+    assert isinstance(entries[0][0], float)
 
 
 def test_clear_specific_key():

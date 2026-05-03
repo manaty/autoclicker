@@ -23,6 +23,7 @@ from .sessions import WindowSession
 
 OUTLINE_COLOR = "#37f03c"        # lime — region active
 COMPLETED_COLOR = "#ff9933"      # orange — session marked completed
+PAUSED_COLOR = "#888888"         # grey — region monitoring paused
 TRANSPARENT_KEY = "#010203"  # any unlikely RGB; Tk makes it see-through
 
 
@@ -34,12 +35,16 @@ class OverlayController:
         on_edit: Optional[Callable[[int], None]] = None,
         on_resize: Optional[Callable[[int], None]] = None,
         on_delete: Optional[Callable[[int], None]] = None,
+        on_toggle_pause: Optional[Callable[[int], None]] = None,
+        on_show_logs: Optional[Callable[[int], None]] = None,
     ) -> None:
         self._root = root
         self._ticker = ticker
         self._on_edit = on_edit
         self._on_resize = on_resize
         self._on_delete = on_delete
+        self._on_toggle_pause = on_toggle_pause
+        self._on_show_logs = on_show_logs
         self._windows: list = []
         self._headers: list[RegionHeader] = []
 
@@ -48,28 +53,33 @@ class OverlayController:
         regions: Sequence[Region],
         monitors: Sequence[Monitor],
         sessions: Sequence[WindowSession] = (),
+        paused_indices: Optional[set[int]] = None,
     ) -> None:
         self.clear()
         monitor_by_index = {m.index: m for m in monitors}
         completed_matches = {
             s.title_match.lower() for s in sessions if s.completed
         }
+        paused_indices = paused_indices or set()
         for i, region in enumerate(regions, start=1):
             mon = monitor_by_index.get(region.monitor_index)
             if mon is None:
                 continue
+            cfg_idx = i - 1
+            is_paused = cfg_idx in paused_indices
             is_completed = (
-                bool(region.window_title_match)
+                not is_paused
+                and bool(region.window_title_match)
                 and region.window_title_match.lower() in completed_matches
             )
-            color = COMPLETED_COLOR if is_completed else OUTLINE_COLOR
+            if is_paused:
+                color = PAUSED_COLOR
+            elif is_completed:
+                color = COMPLETED_COLOR
+            else:
+                color = OUTLINE_COLOR
             self._windows.append(self._build(i, region, mon, color))
             if self._ticker is not None:
-                # Region indices are 1-based for display; convert to the 0-based
-                # cfg.regions index that the App handlers operate on.
-                cfg_idx = i - 1
-                # Match the worker's per-region key when there's no window match,
-                # so each unbound region gets its own marquee.
                 ticker_key = region.window_title_match or f"region_{cfg_idx}"
                 header = RegionHeader(
                     self._root,
@@ -81,7 +91,10 @@ class OverlayController:
                     on_edit=(lambda _i, c=cfg_idx: self._on_edit(c)) if self._on_edit else None,
                     on_resize=(lambda _i, c=cfg_idx: self._on_resize(c)) if self._on_resize else None,
                     on_delete=(lambda _i, c=cfg_idx: self._on_delete(c)) if self._on_delete else None,
+                    on_toggle_pause=(lambda _i, c=cfg_idx: self._on_toggle_pause(c)) if self._on_toggle_pause else None,
+                    on_show_logs=(lambda _i, c=cfg_idx: self._on_show_logs(c)) if self._on_show_logs else None,
                     completed=is_completed,
+                    paused=is_paused,
                 )
                 self._headers.append(header)
 

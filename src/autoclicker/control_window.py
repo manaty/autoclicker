@@ -1,8 +1,17 @@
-"""Dedicated control window — replaces the system-tray icon.
+"""Minimal control window — just status + 3 buttons.
 
-Runs on the main thread (tkinter requires it). The worker thread writes
-status snapshots via :meth:`set_status`; the window polls for changes
-with ``root.after`` so nothing blocks either side.
+The interactive controls live on each region's header bar (pause,
+show-logs, edit goals, resize, delete). The control window only
+keeps:
+
+  - Status: number of regions, AI-check on/off, last detection / verdict.
+  - "Add window region" — the only entry point to add a new region.
+  - "Config" — opens config.json in the OS editor.
+  - "Quit".
+
+There's no global arm/disarm or pause anymore: the autoclicker is
+always active, and the user pauses individual regions from their
+overlay headers.
 """
 from __future__ import annotations
 
@@ -19,7 +28,7 @@ from .paths import config_path, log_dir
 
 @dataclass
 class Status:
-    armed: bool = False
+    armed: bool = True
     paused: bool = False
     ai_check: bool = False
     region_count: int = 0
@@ -30,25 +39,11 @@ class Status:
 class ControlWindow:
     def __init__(
         self,
-        armed: threading.Event,
-        paused: threading.Event,
         on_quit: Callable[[], None],
-        on_pick_regions: Callable[[], None],
-        on_clear_regions: Callable[[], None],
-        on_arm_toggle: Optional[Callable[[], None]] = None,
-        on_pause_toggle: Optional[Callable[[], None]] = None,
         on_pick_window_region: Optional[Callable[[], None]] = None,
-        on_configure_session: Optional[Callable[[], None]] = None,
     ) -> None:
-        self._armed = armed
-        self._paused = paused
         self._on_quit = on_quit
-        self._on_pick_regions = on_pick_regions
-        self._on_clear_regions = on_clear_regions
-        self._on_arm_toggle = on_arm_toggle
-        self._on_pause_toggle = on_pause_toggle
         self._on_pick_window_region = on_pick_window_region
-        self._on_configure_session = on_configure_session
         self._status = Status()
         self._status_lock = threading.Lock()
         self._status_dirty = threading.Event()
@@ -60,10 +55,8 @@ class ControlWindow:
 
         root = tk.Tk()
         root.title("autoclicker")
-        # 6 main buttons + status + info + bottom row — needs ~400px tall.
-        # Allow vertical resize so users with small DPI can shrink it.
-        root.geometry("260x420")
-        root.minsize(260, 360)
+        root.geometry("260x220")
+        root.minsize(260, 200)
         root.resizable(False, True)
         root.attributes("-topmost", True)
         self.root = root
@@ -77,8 +70,8 @@ class ControlWindow:
         pad = {"padx": 8, "pady": 4}
 
         self._status_label = tk.Label(
-            root, text="", font=("Segoe UI", 11, "bold"),
-            anchor="center", bg="#cccccc", fg="black", height=2,
+            root, text="ACTIVE", font=("Segoe UI", 11, "bold"),
+            anchor="center", bg="#37b24d", fg="white", height=2,
         )
         self._status_label.pack(fill="x")
 
@@ -90,23 +83,12 @@ class ControlWindow:
 
         btn_frame = tk.Frame(root)
         btn_frame.pack(fill="x", **pad)
-
-        self._arm_btn = ttk.Button(btn_frame, text="Arm auto-click", command=self._toggle_arm)
-        self._arm_btn.pack(fill="x", pady=2)
-
-        self._pause_btn = ttk.Button(btn_frame, text="Pause monitoring", command=self._toggle_pause)
-        self._pause_btn.pack(fill="x", pady=2)
-
-        ttk.Button(btn_frame, text="Set monitored regions", command=self._pick).pack(fill="x", pady=2)
         ttk.Button(btn_frame, text="Add window region", command=self._pick_window).pack(fill="x", pady=2)
-        ttk.Button(btn_frame, text="Configure window session", command=self._configure_session).pack(fill="x", pady=2)
-        ttk.Button(btn_frame, text="Clear regions", command=self._clear).pack(fill="x", pady=2)
 
         bottom = tk.Frame(root)
         bottom.pack(fill="x", **pad, side="bottom")
-        ttk.Button(bottom, text="Logs", command=self._open_logs, width=8).pack(side="left", padx=2)
-        ttk.Button(bottom, text="Config", command=self._open_config, width=8).pack(side="left", padx=2)
-        ttk.Button(bottom, text="Quit", command=self._quit, width=8).pack(side="right", padx=2)
+        ttk.Button(bottom, text="Config", command=self._open_config, width=10).pack(side="left", padx=2)
+        ttk.Button(bottom, text="Quit", command=self._quit, width=10).pack(side="right", padx=2)
 
         root.protocol("WM_DELETE_WINDOW", self._quit)
         self._refresh()
@@ -123,44 +105,9 @@ class ControlWindow:
         self._status_dirty.set()
 
     # ---- button handlers -------------------------------------------------
-    def _toggle_arm(self) -> None:
-        if self._armed.is_set():
-            self._armed.clear()
-        else:
-            self._armed.set()
-        if self._on_arm_toggle is not None:
-            try:
-                self._on_arm_toggle()
-            except Exception:
-                pass
-        self._refresh()
-
-    def _toggle_pause(self) -> None:
-        if self._paused.is_set():
-            self._paused.clear()
-        else:
-            self._paused.set()
-        if self._on_pause_toggle is not None:
-            try:
-                self._on_pause_toggle()
-            except Exception:
-                pass
-        self._refresh()
-
-    def _pick(self) -> None:
-        self._on_pick_regions()
-
     def _pick_window(self) -> None:
         if self._on_pick_window_region is not None:
             self._on_pick_window_region()
-
-    def _configure_session(self) -> None:
-        if self._on_configure_session is not None:
-            self._on_configure_session()
-
-    def _clear(self) -> None:
-        self._on_clear_regions()
-        self._refresh()
 
     def _quit(self) -> None:
         self._on_quit()
@@ -168,9 +115,6 @@ class ControlWindow:
             self.root.destroy()
         except Exception:
             pass
-
-    def _open_logs(self) -> None:
-        self._open_path(log_dir())
 
     def _open_config(self) -> None:
         p = config_path()
@@ -201,17 +145,6 @@ class ControlWindow:
     def _refresh(self) -> None:
         with self._status_lock:
             st = Status(**self._status.__dict__)
-        armed = self._armed.is_set()
-        paused = self._paused.is_set()
-
-        if paused:
-            txt, bg = "PAUSED", "#b0b0b0"
-        elif armed:
-            txt, bg = "ARMED", "#37b24d"
-        else:
-            txt, bg = "DRY-RUN", "#c7c7c7"
-
-        self._status_label.config(text=txt, bg=bg, fg="white" if armed else "black")
 
         info = [
             f"regions: {st.region_count or 0}",
@@ -222,6 +155,3 @@ class ControlWindow:
         if st.last_verdict:
             info.append(f"verdict: {st.last_verdict}")
         self._info_label.config(text="\n".join(info))
-
-        self._arm_btn.config(text="Disarm (dry-run)" if armed else "Arm auto-click")
-        self._pause_btn.config(text="Resume monitoring" if paused else "Pause monitoring")

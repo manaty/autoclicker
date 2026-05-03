@@ -35,13 +35,14 @@ class App:
         self.cfg = cfg or load_config()
         self.log = setup_logging(self.cfg.log_level)
 
+        # armed/paused kept as Events for backwards compat with status calls,
+        # but the user-facing arm/disarm + global pause toggles were removed —
+        # the autoclicker is always active; per-region pause is the new model.
         self.armed = threading.Event()
-        if self.cfg.armed_on_start:
-            self.armed.set()
+        self.armed.set()
         self.paused = threading.Event()
         self.stop_event = threading.Event()
         self._wakeup = threading.Event()
-        self._pick_requested = threading.Event()
         self._pick_window_requested = threading.Event()
 
         self._capturer: ScreenCapturer | None = None
@@ -51,13 +52,15 @@ class App:
         self._cooldown = Cooldown(interval_s=self.cfg.click_cooldown_s)
         self._consec_failures = 0
         self._idle = IdleRegistry()
-        self._pick_session_requested = threading.Event()
         self._overlay_dirty = threading.Event()
         self._ticker = LogTicker()
-        # Per-region action requests fired from header buttons (Tk thread).
-        # The Tk poll loop drains these and runs the matching handler.
-        self._region_actions: list[tuple[str, int]] = []
-        self._region_actions_lock = threading.Lock()
+        # Per-region pause state. Manual = user clicked the ⏸ icon. Logs-open
+        # = the user has the logs panel up; we auto-pause monitoring while
+        # they read so the ticker doesn't keep mutating under their eyes.
+        self._paused_regions: set[int] = set()
+        self._logs_open_regions: set[int] = set()
+        self._pause_lock = threading.Lock()
+        self._open_logs_panels: dict = {}  # cfg_idx -> RegionLogsPanel
 
         self._window: ControlWindow | None = None
         self._overlay: OverlayController | None = None
@@ -76,20 +79,11 @@ class App:
         )
 
         self._window = ControlWindow(
-            armed=self.armed,
-            paused=self.paused,
             on_quit=self.stop,
-            on_pick_regions=self._request_pick,
-            on_clear_regions=self._clear_regions,
-            on_arm_toggle=self._on_arm_toggle,
-            on_pause_toggle=self._on_pause_toggle,
             on_pick_window_region=self._request_pick_window,
-            on_configure_session=self._request_pick_session,
         )
         self._window.build()
         self._window.set_status(
-            armed=self.armed.is_set(),
-            paused=self.paused.is_set(),
             ai_check=bool(self.cfg.resolved_api_key()),
             region_count=len(self.cfg.regions),
         )
@@ -103,6 +97,8 @@ class App:
             on_edit=self._on_region_edit,
             on_resize=self._on_region_resize,
             on_delete=self._on_region_delete,
+            on_toggle_pause=self._on_region_toggle_pause,
+            on_show_logs=self._on_region_show_logs,
         )
         self._refresh_overlay()
 
@@ -166,23 +162,27 @@ class App:
     def _refresh_overlay(self) -> None:
         if self._overlay is None or self._capturer is None:
             return
+        with self._pause_lock:
+            paused_now = set(self._paused_regions) | set(self._logs_open_regions)
         self._overlay.set(
             self.cfg.regions,
             self._capturer.monitors,
             sessions=self.cfg.window_sessions,
+            paused_indices=paused_now,
         )
         if self._window:
             self._window.set_status(region_count=len(self.cfg.regions))
 
-    # ---- button callbacks (called on Tk thread) -------------------------
-    def _request_pick(self) -> None:
-        self._pick_requested.set()
+    def _is_region_paused(self, cfg_idx: int) -> bool:
+        with self._pause_lock:
+            return (
+                cfg_idx in self._paused_regions
+                or cfg_idx in self._logs_open_regions
+            )
 
+    # ---- button callbacks (called on Tk thread) -------------------------
     def _request_pick_window(self) -> None:
         self._pick_window_requested.set()
-
-    def _request_pick_session(self) -> None:
-        self._pick_session_requested.set()
 
     # ---- per-region header actions (Tk thread) ---------------------------
     def _on_region_edit(self, cfg_idx: int) -> None:
@@ -260,6 +260,59 @@ class App:
         )
         self._refresh_overlay()
 
+    def _on_region_toggle_pause(self, cfg_idx: int) -> None:
+        if cfg_idx < 0 or cfg_idx >= len(self.cfg.regions):
+            return
+        with self._pause_lock:
+            if cfg_idx in self._paused_regions:
+                self._paused_regions.discard(cfg_idx)
+                state = "resumed"
+            else:
+                self._paused_regions.add(cfg_idx)
+                state = "paused"
+        region = self.cfg.regions[cfg_idx]
+        ticker_key = region.window_title_match or f"region_{cfg_idx}"
+        self._ticker.add(f"region #{cfg_idx + 1} {state}", key=ticker_key)
+        self.log.info("region #%d %s by user", cfg_idx + 1, state)
+        self._refresh_overlay()
+
+    def _on_region_show_logs(self, cfg_idx: int) -> None:
+        from .region_logs_panel import RegionLogsPanel
+
+        if cfg_idx < 0 or cfg_idx >= len(self.cfg.regions):
+            return
+        if cfg_idx in self._open_logs_panels:
+            return  # already open
+
+        region = self.cfg.regions[cfg_idx]
+        if self._capturer is None:
+            return
+        mon = next((m for m in self._capturer.monitors if m.index == region.monitor_index), None)
+        if mon is None:
+            return
+
+        ticker_key = region.window_title_match or f"region_{cfg_idx}"
+        with self._pause_lock:
+            self._logs_open_regions.add(cfg_idx)
+
+        def _on_close():
+            with self._pause_lock:
+                self._logs_open_regions.discard(cfg_idx)
+            self._open_logs_panels.pop(cfg_idx, None)
+            self._refresh_overlay()
+
+        panel = RegionLogsPanel(
+            self._window.root,
+            idx=cfg_idx + 1,
+            region=region,
+            monitor=mon,
+            ticker=self._ticker,
+            ticker_key=ticker_key,
+            on_close=_on_close,
+        )
+        self._open_logs_panels[cfg_idx] = panel
+        self._refresh_overlay()
+
     def _on_region_delete(self, cfg_idx: int) -> None:
         """Remove a region after confirmation."""
         from tkinter import messagebox
@@ -282,44 +335,12 @@ class App:
         self.log.info("deleted %s", label)
         self._refresh_overlay()
 
-    def _on_arm_toggle(self) -> None:
-        """Called from the control window whenever armed state flips.
-
-        Clears dedup so a prompt that's already on screen (and was logged
-        in the previous mode) is re-processed immediately in the new mode.
-        """
-        self._dedup = DedupCache(window_s=self.cfg.dedup_window_s)
-        self._wakeup.set()
-        self.log.info("armed=%s (dedup cleared)", self.armed.is_set())
-
-    def _on_pause_toggle(self) -> None:
-        # Same reasoning as arm toggle: a prompt seen just before pause is in
-        # dedup; on resume the user expects it to be re-processed immediately.
-        # Idle trackers are also reset so a long pause doesn't immediately
-        # trip the task-done check on the very next poll cycle.
-        self._dedup = DedupCache(window_s=self.cfg.dedup_window_s)
-        self._idle = IdleRegistry()
-        self._wakeup.set()
-        self.log.info("paused=%s (dedup + idle cleared)", self.paused.is_set())
-
-    def _clear_regions(self) -> None:
-        self.cfg.regions = []
-        save_config(self.cfg)
-        self.log.info("regions cleared")
-        self._refresh_overlay()
-
     def _schedule_pick_dispatch(self) -> None:
         if self._window is None or self._window.root is None:
             return
-        if self._pick_requested.is_set():
-            self._pick_requested.clear()
-            self._run_picker()
         if self._pick_window_requested.is_set():
             self._pick_window_requested.clear()
             self._run_window_picker()
-        if self._pick_session_requested.is_set():
-            self._pick_session_requested.clear()
-            self._run_session_picker()
         if self._overlay_dirty.is_set():
             self._overlay_dirty.clear()
             self._refresh_overlay()
@@ -340,25 +361,6 @@ class App:
     def _start_worker(self) -> None:
         self._worker = threading.Thread(target=self._worker_loop, name="detect", daemon=True)
         self._worker.start()
-
-    def _run_picker(self) -> None:
-        from .region_picker import pick_regions
-
-        assert self._capturer is not None
-        self.log.info("launching region picker")
-        if self._overlay:
-            self._overlay.clear()
-        try:
-            regions = pick_regions(self._capturer.monitors, parent=self._window.root)
-        finally:
-            self._refresh_overlay()
-        if not regions:
-            self.log.info("picker cancelled — keeping %d existing region(s)", len(self.cfg.regions))
-            return
-        self.cfg.regions = regions
-        save_config(self.cfg)
-        self.log.info("saved %d region(s)", len(regions))
-        self._refresh_overlay()
 
     def _run_window_picker(self) -> None:
         """Pick a window, foreground it, then draw region(s) on its monitor."""
@@ -426,58 +428,6 @@ class App:
         )
         self._refresh_overlay()
 
-    def _run_session_picker(self) -> None:
-        """Pick a region-bound window, list goals, click on chat input."""
-        from .session_picker import configure_session
-
-        assert self._capturer is not None
-        self.log.info("launching window-session picker")
-        if self._overlay:
-            self._overlay.clear()
-
-        # Sessions only attach to windows we already monitor. Distinct
-        # title_matches from cfg.regions, in first-seen order.
-        seen: set[str] = set()
-        available: list[str] = []
-        for region in self.cfg.regions:
-            m = (region.window_title_match or "").strip()
-            if not m:
-                continue
-            key = m.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            available.append(m)
-
-        try:
-            session = configure_session(
-                parent=self._window.root,
-                available_matches=available,
-                existing_sessions=list(self.cfg.window_sessions),
-            )
-        except Exception as exc:  # noqa: BLE001
-            self.log.exception("session picker failed: %s", exc)
-            self._refresh_overlay()
-            return
-
-        if session is None:
-            self.log.info("session picker cancelled")
-            self._refresh_overlay()
-            return
-
-        # Replace any existing session for the same title_match.
-        self.cfg.window_sessions = [
-            s for s in self.cfg.window_sessions
-            if s.title_match.lower() != session.title_match.lower()
-        ] + [session]
-        save_config(self.cfg)
-        self._idle.forget(session.title_match)
-        self.log.info(
-            "saved session for %r: %d goal(s), idle_threshold=%.0fs",
-            session.title_match, len(session.goals), session.idle_threshold_s,
-        )
-        self._refresh_overlay()
-
     # ---- worker thread ---------------------------------------------------
     def _worker_loop(self) -> None:
         try:
@@ -530,8 +480,8 @@ class App:
 
         Groups regions by their ``window_title_match`` so each window's
         regions are captured back-to-back. Within a group:
-          1. (when armed) bring the window to the foreground;
-          2. OCR each region and run Yes/No detection (existing behaviour);
+          1. bring the window to the foreground;
+          2. OCR each region and run Yes/No detection;
           3. update the idle tracker with the concatenated OCR text;
           4. if the window has a configured ``WindowSession`` that's
              gone idle past its threshold, ask OpenAI whether the AI
@@ -551,7 +501,7 @@ class App:
             key = (region.window_title_match or "").strip() or None
             groups.setdefault(key, []).append(region)
 
-        switch_focus = self.armed.is_set() and any(k for k in groups)
+        switch_focus = any(k for k in groups)
         saved_fg_hwnd: int | None = None
         if switch_focus:
             fg = get_foreground()
@@ -579,6 +529,9 @@ class App:
 
                 window_text_parts: list[str] = []
                 for region in regions:
+                    cfg_idx = cfg_idx_by_id.get(id(region), 0)
+                    if self._is_region_paused(cfg_idx):
+                        continue
                     try:
                         frame = self._capturer.grab_region(region)
                     except ValueError:
@@ -586,7 +539,6 @@ class App:
                     lines = self._ocr.run(frame.image)
                     if lines:
                         window_text_parts.append("\n".join(ln.text for ln in lines))
-                    cfg_idx = cfg_idx_by_id.get(id(region), 0)
                     ticker_key = pattern or f"region_{cfg_idx}"
                     self._process_detection(frame, lines, ticker_key=ticker_key)
 
@@ -640,11 +592,6 @@ class App:
             self._ticker.add(f"BLOCKED · {verdict.category}", key=ticker_key)
             return
 
-        if not self.armed.is_set():
-            self.log.info("WOULD CLICK (%d,%d) — dry-run", det.yes_click_x, det.yes_click_y)
-            self._ticker.add("would click (dry-run)", key=ticker_key)
-            return
-
         if not self._cooldown.ready():
             self.log.info("skipped click: cooldown active")
             return
@@ -679,12 +626,6 @@ class App:
         if idle_for < session.idle_threshold_s:
             return
         if not st.can_act(session.cooldown_s):
-            return
-        if not self.armed.is_set():
-            self.log.info(
-                "window %r: idle %.0fs but dry-run — skipping task check",
-                session.title_match, idle_for,
-            )
             return
 
         self.log.info(
