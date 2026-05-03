@@ -23,6 +23,10 @@ class WindowIdleState:
     last_text_hash: Optional[str] = None
     last_change_at: float = 0.0
     last_action_at: float = 0.0
+    # 'done' / 'not_done' / None — used to require two consecutive
+    # 'done' verdicts before parking the session, so an AI mid-batch
+    # that's about to keep working doesn't get prematurely flagged.
+    last_verdict: Optional[str] = None
 
     def observe(self, text: str, now: Optional[float] = None) -> bool:
         """Record an observation. Returns True if the text changed."""

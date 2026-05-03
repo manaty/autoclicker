@@ -776,15 +776,25 @@ class App:
 
         ticker_key = session.title_match
         if verdict.status == "done":
-            self._send_to_window(_TASK_DONE_CONFIRM_TEXT, session)
-            session.completed = True
-            try:
-                save_config(self.cfg)
-            except Exception:
-                self.log.exception("failed to persist completed=True for %r", session.title_match)
-            self._overlay_dirty.set()
-            self.log.info("window %r marked completed", session.title_match)
-            self._ticker.add("DONE — asked confirmation, session parked", key=ticker_key)
+            if st.last_verdict == "done":
+                # Second consecutive 'done' (after a previous round where we
+                # already asked "as-tu tout terminé ?" and the AI's answer
+                # didn't reopen anything) → safe to park the session.
+                session.completed = True
+                try:
+                    save_config(self.cfg)
+                except Exception:
+                    self.log.exception("failed to persist completed=True for %r", session.title_match)
+                self._overlay_dirty.set()
+                self.log.info("window %r marked completed (2nd done)", session.title_match)
+                self._ticker.add("DONE confirmed — session parked", key=ticker_key)
+            else:
+                # First 'done' → ask the question but don't park yet; the
+                # AI's reply will be re-evaluated next idle cycle.
+                self._send_to_window(_TASK_DONE_CONFIRM_TEXT, session)
+                self.log.info("window %r: asked confirmation (1st done — awaiting reply)", session.title_match)
+                self._ticker.add("first 'done' — asked confirmation, awaiting reply", key=ticker_key)
+            st.last_verdict = "done"
         elif verdict.status == "not_done" or api_error_fail_open:
             if api_error_fail_open:
                 self.log.warning("task-check API failed — sending continue (fail-open)")
@@ -794,9 +804,11 @@ class App:
                 else "not_done — sent continue prompt",
                 key=ticker_key,
             )
+            st.last_verdict = "not_done"
         else:
             self.log.info("task-check: unknown — no action")
             self._ticker.add("idle but task status unknown — no action", key=ticker_key)
+            # Don't change last_verdict — 'unknown' is non-committal.
 
         st.mark_acted()
 

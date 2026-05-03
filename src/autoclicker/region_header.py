@@ -200,12 +200,11 @@ class RegionHeader:
     def _refresh_marquee_text(self) -> None:
         if self._marquee_canvas is None or self._marquee_text_id is None:
             return
-        # Strict per-region view — never fall back to the global stream,
-        # otherwise regions that haven't seen events yet end up showing
-        # the same content as their neighbours.
-        text = self._ticker.text_for(key=self._ticker_key, fallback_global=False)
-        if not text:
-            text = "(no events yet — waiting for a prompt or task-check)"
+        # Marquee shows only the *most recent* entry — the full history
+        # is one click away (the 👁 panel). This keeps the bandeau
+        # readable and lets the user see the latest event at a glance.
+        entries = self._ticker.lines_for(key=self._ticker_key, fallback_global=False)
+        text = entries[-1][1] if entries else "(no events yet — waiting for a prompt or task-check)"
         if text != self._marquee_text:
             self._marquee_text = text
             self._marquee_canvas.itemconfig(self._marquee_text_id, text=text)

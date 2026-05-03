@@ -67,3 +67,13 @@ def test_idle_registry_forget():
     a = reg.get("x")
     reg.forget("x")
     assert reg.get("x") is not a
+
+
+def test_last_verdict_starts_none_and_is_writable():
+    """Used to require two consecutive 'done' verdicts before parking."""
+    st = WindowIdleState(title_match="x")
+    assert st.last_verdict is None
+    st.last_verdict = "done"
+    assert st.last_verdict == "done"
+    st.last_verdict = "not_done"
+    assert st.last_verdict == "not_done"
