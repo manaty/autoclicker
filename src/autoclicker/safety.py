@@ -66,6 +66,7 @@ def classify(command_text: str, cfg: Config) -> ClassifyResult:
 
     client = OpenAI(api_key=api_key, timeout=cfg.openai_timeout_s)
 
+    last_error: Optional[str] = None
     primary, fallback = cfg.resolved_safety_models()
     for model in (primary, fallback):
         try:
