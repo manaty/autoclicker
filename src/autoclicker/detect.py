@@ -9,10 +9,12 @@ from .ocr import OcrLine
 CLAUDE_HEADER_RE = re.compile(r"allow\s+this\s+(bash\s+)?command", re.IGNORECASE)
 YES_RE = re.compile(r"^\s*1\s*[\.\)]?\s*yes\b", re.IGNORECASE)
 CLAUDE_NO_RE = re.compile(r"^\s*[2-9]\s*[\.\)]?\s*no\b", re.IGNORECASE)
-# A numbered menu option: "1. Yes", "2 Yes, allow…", "3. No, …". Requires a
-# digit then whitespace then a letter, so it won't match command fragments
-# like "2>&1" or "3rd". The leading number tells us the option's position.
-OPTION_RE = re.compile(r"^\s*([1-9])\s*[\.\)]?\s+[A-Za-z]")
+# A numbered menu option: "1. Yes", "2 Yes, allow…", "3No" (OCR often drops
+# the space). A digit then optional dot/paren then a letter — the letter
+# requirement keeps command fragments like "2>&1" from matching. Spacing is
+# optional to stay consistent with YES_RE / CLAUDE_NO_RE, which OCR-merged
+# lines still satisfy. The leading number tells us the option's position.
+OPTION_RE = re.compile(r"^\s*([1-9])\s*[\.\)]?\s*[A-Za-z]")
 
 # Codex CLI: option 3 always says "...tell Codex what to do differently".
 # That string is the most reliable anchor — it stays in English even when
@@ -103,18 +105,20 @@ def _detect_claude(lines: List[OcrLine], monitor: Monitor) -> Optional[Detection
         yes_top = yes_opt.top
     else:
         # "1 Yes" wasn't read (highlight bar). Extrapolate its row from the
-        # option directly above No, assuming uniform row spacing.
-        prev = options.get(no_num - 1)
-        if prev is None:
+        # nearest lower-numbered sibling and No, assuming uniform row spacing.
+        lower = sorted((n for n in options if n < no_num), reverse=True)
+        if not lower:
             return None
-        pitch = (no_line.top - prev.top) / max(1, (no_num - (no_num - 1)))
+        k = lower[0]
+        ref = options[k]
+        pitch = (no_line.top - ref.top) / (no_num - k)
         if pitch <= 0:
             return None
         yes_top = int(round(no_line.top - pitch * (no_num - 1)))
         yes_y = int(yes_top + line_h / 2)
         # Land within row 1, a little right of the number gutter; the whole
         # option row is clickable so exact x doesn't matter much.
-        yes_x = int(prev.left + line_h)
+        yes_x = int(ref.left + line_h)
 
     headers = [
         ln for ln in lines

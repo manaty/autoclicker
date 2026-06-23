@@ -71,6 +71,38 @@ def test_detects_when_highlighted_yes_missed_by_ocr():
     assert "while kill" in det.command_text
 
 
+def test_detects_when_ocr_drops_space_after_number():
+    # OCR frequently merges the number and word ("1Yes", "3No"). These satisfy
+    # YES_RE / CLAUDE_NO_RE, so detection must not require a space either.
+    lines = [
+        _line("Allow this bash command?", top=60),
+        _line("pnpm add @checkout.com/checkout-web-components", top=110),
+        _line("1Yes", top=180, left=100, w=120),
+        _line("2Yes,allow pnpm add for all projects", top=220, left=100),
+        _line("3No", top=260, left=100, w=120),
+    ]
+    det = detect_prompt(lines, MON)
+    assert det is not None
+    assert det.source == "claude"
+    # clicks option 1 ("1Yes")
+    assert det.yes_click_y == (180 + 12)
+
+
+def test_detects_merged_space_with_highlighted_yes_missed():
+    # Combined worst case: merged spacing AND the highlighted "1 Yes" row
+    # dropped by OCR. Anchor on "3No", extrapolate row 1.
+    lines = [
+        _line("Allow this bash command?", top=60),
+        _line("pnpm add something", top=110),
+        _line("2Yes,allow pnpm add for all projects", top=180, left=100),
+        _line("3No", top=220, left=100, w=120),
+    ]
+    det = detect_prompt(lines, MON)
+    assert det is not None
+    # pitch = 220-180 = 40; row 1 top = 220 - 80 = 140; center y = 152
+    assert det.yes_click_y == 152
+
+
 def test_ignores_lone_yes_without_no():
     # A "1 Yes" with no matching "[2-9] No" nearby is not a confirm menu.
     lines = [
