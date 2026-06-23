@@ -9,6 +9,10 @@ from .ocr import OcrLine
 CLAUDE_HEADER_RE = re.compile(r"allow\s+this\s+(bash\s+)?command", re.IGNORECASE)
 YES_RE = re.compile(r"^\s*1\s*[\.\)]?\s*yes\b", re.IGNORECASE)
 CLAUDE_NO_RE = re.compile(r"^\s*[2-9]\s*[\.\)]?\s*no\b", re.IGNORECASE)
+# A numbered menu option: "1. Yes", "2 Yes, allow…", "3. No, …". Requires a
+# digit then whitespace then a letter, so it won't match command fragments
+# like "2>&1" or "3rd". The leading number tells us the option's position.
+OPTION_RE = re.compile(r"^\s*([1-9])\s*[\.\)]?\s+[A-Za-z]")
 
 # Codex CLI: option 3 always says "...tell Codex what to do differently".
 # That string is the most reliable anchor — it stays in English even when
@@ -43,80 +47,100 @@ def _find_after(lines: List[OcrLine], pattern: re.Pattern, after_y: int) -> Opti
     return best
 
 
-# Max vertical gap between the "Yes" and "No" options, in Yes-line-heights,
-# for them to count as one menu. Keeps a stray "1. Yes" from pairing with an
-# unrelated "[2-9]. No" elsewhere in the pane.
-_OPTION_GAP_LINES = 6
+# How far above the "No" option (in No-line-heights) we still treat numbered
+# lines as part of the same menu cluster. Generous enough to span a wrapped
+# multi-line option, tight enough to exclude the command block above.
+_OPTION_GAP_LINES = 8
 # When no "Allow this command" header is found, the question/command text is
-# taken from the lines above the "Yes" option, up to this many line-heights up.
+# taken from the lines above option 1, up to this many line-heights up.
 _NO_HEADER_LOOKBACK_LINES = 25
 
 
-def _find_option_pair(lines: List[OcrLine]):
-    """Find the active "1. Yes" / "[2-9]. No" option menu.
-
-    Returns (yes_line, no_line) or None. When several Yes options are on
-    screen (scrolled-back prompts in the chat pane), prefer the *lowest* one
-    that has a matching No just below it — that's the live prompt.
-    """
-    candidates = [ln for ln in lines if YES_RE.match(ln.text.strip())]
-    for yes_line in sorted(candidates, key=lambda l: l.top, reverse=True):
-        line_h = max(1, yes_line.bottom - yes_line.top)
-        no_line: Optional[OcrLine] = None
-        for ln in lines:
-            if ln.top <= yes_line.top:
-                continue
-            if ln.top - yes_line.bottom > line_h * _OPTION_GAP_LINES:
-                continue
-            if CLAUDE_NO_RE.match(ln.text.strip()):
-                if no_line is None or ln.top < no_line.top:
-                    no_line = ln
-        if no_line is not None:
-            return yes_line, no_line
-    return None
+def _option_number(text: str) -> Optional[int]:
+    m = OPTION_RE.match(text.strip())
+    return int(m.group(1)) if m else None
 
 
 def _detect_claude(lines: List[OcrLine], monitor: Monitor) -> Optional[Detection]:
-    """Detect a Claude Code confirmation prompt.
+    """Detect a Claude Code confirmation prompt and locate its "Yes" option.
 
-    Anchors on the "1. Yes" / "[2-9]. No" option menu rather than the header
-    text: Claude shows many prompt headers ("Allow this bash command?", "Do
-    you want to make this edit?", "Do you want to proceed?", …) and OCR often
-    misreads the long header line while reading the short option lines
-    cleanly. The option pair is the one reliable signal. The "Allow this
-    command" header, when present, is only used to bound the command text.
+    Anchors on the "[2-9] No" option — every confirm menu has one, and it
+    reads cleanly even when the header text is missing/garbled. "Yes" is
+    always option 1, directly above. Crucially, the *selected* option (Yes,
+    by default) is drawn with a full-width highlight bar that RapidOCR often
+    fails to read, so we can't rely on the "1 Yes" line being present. When
+    it is missing we extrapolate option 1's row from the evenly-spaced
+    sibling options, which OCR does read.
     """
-    pair = _find_option_pair(lines)
-    if pair is None:
+    no_lines = [ln for ln in lines if CLAUDE_NO_RE.match(ln.text.strip())]
+    if not no_lines:
         return None
-    yes_line, no_line = pair
+    # Lowest "No" on screen = the live prompt (older ones scrolled up).
+    no_line = max(no_lines, key=lambda l: l.top)
+    no_num = _option_number(no_line.text)
+    if no_num is None or no_num < 2:
+        return None
+    line_h = max(1, no_line.bottom - no_line.top)
 
-    line_h = max(1, yes_line.bottom - yes_line.top)
+    # Collect the numbered options clustered just above (and including) No.
+    cluster_top = no_line.top - line_h * _OPTION_GAP_LINES
+    options: dict[int, OcrLine] = {}
+    for ln in lines:
+        if ln.bottom <= cluster_top or ln.top > no_line.bottom:
+            continue
+        num = _option_number(ln.text)
+        if num is None or num > no_num:
+            continue
+        # Prefer the lowest line for a given number (the live menu).
+        if num not in options or ln.top > options[num].top:
+            options[num] = ln
+    options[no_num] = no_line
+
+    yes_opt = options.get(1)
+    if yes_opt is not None and YES_RE.match(yes_opt.text.strip()):
+        yes_x = yes_opt.center_x
+        yes_y = yes_opt.center_y
+        yes_top = yes_opt.top
+    else:
+        # "1 Yes" wasn't read (highlight bar). Extrapolate its row from the
+        # option directly above No, assuming uniform row spacing.
+        prev = options.get(no_num - 1)
+        if prev is None:
+            return None
+        pitch = (no_line.top - prev.top) / max(1, (no_num - (no_num - 1)))
+        if pitch <= 0:
+            return None
+        yes_top = int(round(no_line.top - pitch * (no_num - 1)))
+        yes_y = int(yes_top + line_h / 2)
+        # Land within row 1, a little right of the number gutter; the whole
+        # option row is clickable so exact x doesn't matter much.
+        yes_x = int(prev.left + line_h)
+
     headers = [
         ln for ln in lines
-        if CLAUDE_HEADER_RE.search(ln.text) and ln.bottom < yes_line.top
+        if CLAUDE_HEADER_RE.search(ln.text) and ln.bottom <= yes_top
     ]
     header = max(headers, key=lambda l: l.bottom) if headers else None
-    if header is not None:
-        top_bound = header.bottom
-    else:
-        top_bound = yes_line.top - line_h * _NO_HEADER_LOOKBACK_LINES
+    top_bound = header.bottom if header is not None else yes_top - line_h * _NO_HEADER_LOOKBACK_LINES
 
     command_lines = [
         ln for ln in lines
-        if ln.top > top_bound and ln.bottom < yes_line.top and ln.text.strip()
+        if ln.top > top_bound and ln.bottom <= yes_top
+        and ln.text.strip() and _option_number(ln.text) is None
     ]
     command_text = "\n".join(ln.text.strip() for ln in command_lines)
     if not command_text:
-        return None
+        # Command block unreadable too — still click, but keep the text
+        # distinct per prompt so the dedup cache doesn't collapse prompts.
+        command_text = no_line.text.strip()
 
     return Detection(
         monitor=monitor,
         command_text=command_text,
-        yes_click_x=yes_line.center_x + monitor.left,
-        yes_click_y=yes_line.center_y + monitor.top,
-        header=header or command_lines[0],
-        yes=yes_line,
+        yes_click_x=yes_x + monitor.left,
+        yes_click_y=yes_y + monitor.top,
+        header=header or (command_lines[0] if command_lines else no_line),
+        yes=yes_opt or no_line,
         no=no_line,
         source="claude",
     )

@@ -49,6 +49,28 @@ def test_detects_without_header():
     assert det.yes_click_y == (220 + 12)
 
 
+def test_detects_when_highlighted_yes_missed_by_ocr():
+    # The selected option (Yes, by default) is drawn with a highlight bar that
+    # RapidOCR often fails to read — so the "1 Yes" line is absent while the
+    # other options read fine. We must still click option 1, extrapolating its
+    # row from the evenly-spaced siblings.
+    lines = [
+        _line("Allow this bash command?", top=60),
+        _line("cd /repo && while kill -0 %1; do sleep 2; done", top=110),
+        # no "1 Yes" line — highlighted row dropped by OCR
+        _line("2 Yes, allow kill -0 %1 for all projects", top=180, left=100),
+        _line("3 No", top=220, left=100, w=120),
+    ]
+    det = detect_prompt(lines, MON)
+    assert det is not None
+    assert det.source == "claude"
+    # pitch = 220-180 = 40; row 1 top = 220 - 40*2 = 140; click center y = 152
+    assert det.yes_click_y == 152
+    # row 1 is above option 2, below the command line
+    assert 134 < det.yes_click_y < 180
+    assert "while kill" in det.command_text
+
+
 def test_ignores_lone_yes_without_no():
     # A "1 Yes" with no matching "[2-9] No" nearby is not a confirm menu.
     lines = [
