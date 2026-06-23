@@ -1,6 +1,17 @@
+import numpy as np
+
 from autoclicker.capture import Monitor
-from autoclicker.detect import detect_prompt
+from autoclicker.detect import detect_prompt, find_selected_row
 from autoclicker.ocr import OcrLine
+
+
+def _blue_bar_image(h=300, w=600, top=140, bottom=171):
+    """A dark region image with a solid 'selection blue' bar."""
+    img = np.full((h, w, 3), 30, dtype=np.uint8)
+    img[top:bottom, :, 0] = 200  # B
+    img[top:bottom, :, 1] = 100  # G
+    img[top:bottom, :, 2] = 40   # R
+    return img
 
 
 def _line(text, top, left=100, w=400, h=24):
@@ -101,6 +112,50 @@ def test_detects_merged_space_with_highlighted_yes_missed():
     assert det is not None
     # pitch = 220-180 = 40; row 1 top = 220 - 80 = 140; center y = 152
     assert det.yes_click_y == 152
+
+
+def test_find_selected_row_locates_blue_bar():
+    res = find_selected_row(_blue_bar_image())
+    assert res is not None
+    cx, cy = res
+    assert cy == 155  # center of rows 140..170
+    assert 250 < cx < 350  # roughly centered horizontally
+
+
+def test_find_selected_row_none_on_plain_image():
+    img = np.full((300, 600, 3), 30, dtype=np.uint8)
+    assert find_selected_row(img) is None
+
+
+def test_detects_yes_via_blue_bar_when_ocr_misses_everything():
+    # Worst case: the "1 Yes" row is entirely dropped AND option 2's number is
+    # garbled. The blue highlight bar still pins the Yes click precisely.
+    img = _blue_bar_image(top=140, bottom=171)
+    lines = [
+        _line("Allow this bash command?", top=60),
+        _line("cd /repo && find app -name voucher_handler.rb", top=110),
+        _line("Yes, allow ls app/models and find app for all projects", top=180),
+        _line("3 No", top=220, left=100, w=120),
+    ]
+    det = detect_prompt(lines, MON, image=img)
+    assert det is not None
+    assert det.source == "claude"
+    assert det.yes_click_y == 155  # bar center, not OCR/extrapolation
+
+
+def test_blue_bar_ignored_when_below_no_row():
+    # If the selection is on the No row (bar below No), don't treat it as Yes.
+    img = _blue_bar_image(top=230, bottom=261)  # bar at/below No
+    lines = [
+        _line("Allow this bash command?", top=60),
+        _line("cmd", top=110),
+        _line("1 Yes", top=180, left=100, w=120),
+        _line("3 No", top=220, left=100, w=120),
+    ]
+    det = detect_prompt(lines, MON, image=img)
+    assert det is not None
+    # Falls back to the OCR'd "1 Yes" (top 180), not the below-No bar.
+    assert det.yes_click_y == (180 + 12)
 
 
 def test_ignores_lone_yes_without_no():

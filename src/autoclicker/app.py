@@ -681,7 +681,7 @@ class App:
     def _process_detection(self, frame, lines, ticker_key: str = "") -> None:
         if not lines:
             return
-        det = detect_prompt(lines, frame.monitor)
+        det = detect_prompt(lines, frame.monitor, image=frame.image)
         if det is None:
             self._log_missed_detection(lines, ticker_key)
             return
@@ -695,9 +695,9 @@ class App:
 
         cmd_short = _truncate(det.command_text)
         self.log.info(
-            "detected [%s] on monitor %d: cmd=%r yes@(%d,%d)",
+            "detected [%s] on monitor %d: cmd=%r yes@(%d,%d) via=%s",
             det.source, frame.monitor.index, cmd_short,
-            det.yes_click_x, det.yes_click_y,
+            det.yes_click_x, det.yes_click_y, det.yes_source,
         )
         self._ticker.add(f"detected [{det.source}]: {_truncate(det.command_text, 60)}", key=ticker_key)
         if self._window:

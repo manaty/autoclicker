@@ -36,6 +36,7 @@ class Detection:
     yes: OcrLine
     no: OcrLine
     source: str = "claude"
+    yes_source: str = "ocr"  # how the Yes target was located: bar|ocr|extrapolated
 
 
 def _find_after(lines: List[OcrLine], pattern: re.Pattern, after_y: int) -> Optional[OcrLine]:
@@ -63,7 +64,64 @@ def _option_number(text: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-def _detect_claude(lines: List[OcrLine], monitor: Monitor) -> Optional[Detection]:
+def find_selected_row(image, min_width_frac: float = 0.40, min_height_px: int = 6):
+    """Locate the highlighted (selected) option row by its solid blue bar.
+
+    Claude Code / Codex draw the currently-selected option — "Yes" by default
+    when a confirm prompt first appears — as a full-width saturated-blue bar.
+    That bar is far more reliable to find than OCR of the (light-on-blue) text
+    drawn on top of it, which RapidOCR routinely drops.
+
+    Returns ``(center_x, center_y)`` in image-local pixels for the *topmost*
+    such bar (option 1 / the default selection sits at the top), or ``None``.
+    """
+    try:
+        import numpy as np
+    except Exception:  # pragma: no cover - numpy always present at runtime
+        return None
+    if image is None or getattr(image, "ndim", 0) != 3 or image.shape[2] < 3:
+        return None
+
+    # mss frames are BGR(A); channel 0=blue, 1=green, 2=red.
+    b = image[:, :, 0].astype("int16")
+    g = image[:, :, 1].astype("int16")
+    r = image[:, :, 2].astype("int16")
+    # A "selection blue" pixel: blue clearly dominant over red and green.
+    blue = (b > 90) & (b - r > 35) & (b - g > 12)
+    h, w = blue.shape
+    if h == 0 or w == 0:
+        return None
+
+    row_frac = blue.sum(axis=1) / float(w)
+    hot = row_frac >= min_width_frac
+    if not hot.any():
+        return None
+
+    # Topmost contiguous run of "hot" rows = the bar of the top-most selected
+    # option (Yes, by default).
+    rows = np.where(hot)[0]
+    start = int(rows[0])
+    end = start
+    for y in rows[1:]:
+        if int(y) == end + 1:
+            end = int(y)
+        else:
+            break
+    if (end - start + 1) < min_height_px:
+        return None
+
+    band = blue[start : end + 1, :]
+    cols = np.where(band.any(axis=0))[0]
+    if len(cols) == 0:
+        return None
+    cx = (int(cols[0]) + int(cols[-1])) // 2
+    cy = (start + end) // 2
+    return cx, cy
+
+
+def _detect_claude(
+    lines: List[OcrLine], monitor: Monitor, image=None
+) -> Optional[Detection]:
     """Detect a Claude Code confirmation prompt and locate its "Yes" option.
 
     Anchors on the "[2-9] No" option — every confirm menu has one, and it
@@ -98,20 +156,51 @@ def _detect_claude(lines: List[OcrLine], monitor: Monitor) -> Optional[Detection
             options[num] = ln
     options[no_num] = no_line
 
+    # Primary locator: the blue highlight bar of the selected option. It's the
+    # default selection (Yes) and is immune to the OCR failures that plague the
+    # light-on-blue option text. Only trust a bar that sits above the No row
+    # (i.e. a "Yes"-side option is selected, not No).
+    bar = find_selected_row(image) if image is not None else None
     yes_opt = options.get(1)
-    if yes_opt is not None and YES_RE.match(yes_opt.text.strip()):
+    if bar is not None and bar[1] < no_line.top:
+        yes_x, yes_y = bar
+        yes_top = yes_y
+        yes_source = "bar"
+    elif yes_opt is not None and YES_RE.match(yes_opt.text.strip()):
         yes_x = yes_opt.center_x
         yes_y = yes_opt.center_y
         yes_top = yes_opt.top
+        yes_source = "ocr"
     else:
-        # "1 Yes" wasn't read (highlight bar). Extrapolate its row from the
-        # nearest lower-numbered sibling and No, assuming uniform row spacing.
+        yes_source = "extrapolated"
+        # "1 Yes" wasn't read — its row is drawn with a highlight bar that
+        # RapidOCR drops. Extrapolate its position assuming uniform row
+        # spacing, using a reference row above No and its option distance.
+        ref: Optional[OcrLine] = None
+        ref_dist = 0  # how many option rows ref sits above No
         lower = sorted((n for n in options if n < no_num), reverse=True)
-        if not lower:
+        if lower:
+            # Best case: another option's number was read.
+            ref = options[lower[0]]
+            ref_dist = no_num - lower[0]
+        else:
+            # The siblings' numbers were dropped too (common with long option
+            # text). The nearest OCR line above No is option (no_num - 1) —
+            # use its text row even though its number is unreadable.
+            above = [
+                ln for ln in lines
+                if ln.bottom <= no_line.top and ln.top > cluster_top and ln.text.strip()
+            ]
+            if above:
+                cand = max(above, key=lambda l: l.top)  # nearest above No
+                # Sanity: one option row is ~1–3 text-line-heights tall; reject
+                # a reference that's really the command block far above.
+                if 0 < (no_line.top - cand.top) <= line_h * 3:
+                    ref = cand
+                    ref_dist = 1
+        if ref is None or ref_dist <= 0:
             return None
-        k = lower[0]
-        ref = options[k]
-        pitch = (no_line.top - ref.top) / (no_num - k)
+        pitch = (no_line.top - ref.top) / ref_dist
         if pitch <= 0:
             return None
         yes_top = int(round(no_line.top - pitch * (no_num - 1)))
@@ -147,6 +236,7 @@ def _detect_claude(lines: List[OcrLine], monitor: Monitor) -> Optional[Detection
         yes=yes_opt or no_line,
         no=no_line,
         source="claude",
+        yes_source=yes_source,
     )
 
 
@@ -201,14 +291,15 @@ def _detect_codex(lines: List[OcrLine], monitor: Monitor) -> Optional[Detection]
     )
 
 
-def detect_prompt(lines: List[OcrLine], monitor: Monitor) -> Optional[Detection]:
+def detect_prompt(lines: List[OcrLine], monitor: Monitor, image=None) -> Optional[Detection]:
     # When the "Allow this command" header is present, Claude wins outright.
     # Otherwise prefer Codex's "tell Codex" anchor (so its prompts keep their
     # source label) and only then fall back to the header-less Claude menu —
     # this is what catches edit / "Do you want to proceed?" prompts and the
-    # common case where OCR drops the header line.
+    # common case where OCR drops the header line. ``image`` (the region frame)
+    # lets Claude detection locate the Yes option by its blue highlight bar.
     if any(CLAUDE_HEADER_RE.search(ln.text) for ln in lines):
-        claude = _detect_claude(lines, monitor)
+        claude = _detect_claude(lines, monitor, image)
         if claude is not None:
             return claude
-    return _detect_codex(lines, monitor) or _detect_claude(lines, monitor)
+    return _detect_codex(lines, monitor) or _detect_claude(lines, monitor, image)
