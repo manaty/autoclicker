@@ -298,3 +298,80 @@ def test_claude_takes_priority_over_codex():
     det = detect_prompt(lines, MON)
     assert det is not None
     assert det.source == "claude"
+
+
+# ----- Codex VS Code approval cards ---------------------------------------
+
+
+def test_detects_codex_ui_allow_once_button():
+    lines = [
+        _line("Terminal", top=20, left=22, w=60, h=14),
+        _line(
+            "May I let Supabase CLI inspect the local Docker database to run the final database lint",
+            top=50, left=22, w=520, h=14,
+        ),
+        _line("on the new migrations?", top=72, left=22, w=180, h=14),
+        _line("supabase db lint --level warning", top=112, left=26, w=280, h=14),
+        _line("Deny", top=148, left=414, w=38, h=16),
+        _line("Allow once", top=148, left=470, w=72, h=16),
+    ]
+
+    det = detect_prompt(lines, MON)
+
+    assert det is not None
+    assert det.source == "codex-ui"
+    assert det.yes.text == "Allow once"
+    assert det.no.text == "Deny"
+    assert det.yes_click_x == 506
+    assert det.yes_click_y == 156
+    assert "supabase db lint --level warning" in det.command_text
+
+
+def test_codex_ui_monitor_offset_applied():
+    mon = Monitor(index=2, left=1920, top=100, width=1920, height=1080)
+    lines = [
+        _line("Run tests?", top=50, left=20, w=100),
+        _line("pytest", top=80, left=20, w=80),
+        _line("Deny", top=130, left=300, w=50),
+        _line("Allow once", top=130, left=370, w=100),
+    ]
+
+    det = detect_prompt(lines, mon)
+
+    assert det is not None
+    assert det.yes_click_x == 1920 + 420
+    assert det.yes_click_y == 100 + 142
+
+
+def test_detects_codex_ui_when_ocr_merges_allow_once():
+    # RapidOCR reads the attached VS Code screenshot as "Allowonce".
+    lines = [
+        _line("May I run this command?", top=50, left=20, w=200),
+        _line("pytest", top=90, left=20, w=80),
+        _line("Deny", top=148, left=419, w=32, h=18),
+        _line("Allowonce", top=150, left=474, w=61, h=12),
+    ]
+
+    det = detect_prompt(lines, MON)
+
+    assert det is not None
+    assert det.source == "codex-ui"
+    assert det.yes.text == "Allowonce"
+    assert (det.yes_click_x, det.yes_click_y) == (504, 156)
+
+
+def test_ignores_allow_once_without_deny_button():
+    lines = [
+        _line("Documentation: choose Allow once to continue", top=50),
+        _line("Allow once", top=100, left=300, w=100),
+    ]
+    assert detect_prompt(lines, MON) is None
+
+
+def test_ignores_allow_once_when_deny_is_not_on_same_row():
+    lines = [
+        _line("Deny", top=20, left=100, w=60),
+        _line("Some unrelated content", top=100),
+        _line("Allow once", top=220, left=300, w=100),
+    ]
+    assert detect_prompt(lines, MON) is None

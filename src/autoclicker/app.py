@@ -632,6 +632,7 @@ class App:
         """
         from .detect import (
             CLAUDE_HEADER_RE, YES_RE, CLAUDE_NO_RE, CODEX_ANCHOR_RE,
+            CODEX_UI_ALLOW_ONCE_RE, CODEX_UI_DENY_RE,
         )
         now = time.monotonic()
         diag_key = ticker_key + "::diag"
@@ -646,10 +647,17 @@ class App:
         has_yes = any(YES_RE.match(ln.text.strip()) for ln in lines)
         has_no = any(CLAUDE_NO_RE.match(ln.text.strip()) for ln in lines)
         has_codex = bool(CODEX_ANCHOR_RE.search(joined))
+        has_allow_once = any(
+            CODEX_UI_ALLOW_ONCE_RE.match(ln.text.strip()) for ln in lines
+        )
+        has_deny = any(CODEX_UI_DENY_RE.match(ln.text.strip()) for ln in lines)
 
         # Only log if at least one prompt-shaped marker is present —
         # otherwise we'd flood every chat the autoclicker watches.
-        if not (has_header or has_codex or (has_yes and has_no)):
+        if not (
+            has_header or has_codex or (has_yes and has_no)
+            or has_allow_once or has_deny
+        ):
             return
 
         self._last_heartbeat_at[diag_key] = now
@@ -659,6 +667,9 @@ class App:
         bits.append(f"no={'✓' if has_no else '✗'}")
         if has_codex:
             bits.append("codex-anchor=✓")
+        if has_allow_once or has_deny:
+            bits.append(f"allow-once={'✓' if has_allow_once else '✗'}")
+            bits.append(f"deny={'✓' if has_deny else '✗'}")
         msg = f"prompt-shaped but not detected ({', '.join(bits)})"
         self.log.info("%s for ticker_key=%r", msg, ticker_key)
         self._ticker.add(msg, key=ticker_key)

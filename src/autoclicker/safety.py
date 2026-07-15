@@ -6,8 +6,8 @@ from pydantic import BaseModel, Field
 from .config import Config
 
 
-SYSTEM_PROMPT = """You classify text scraped from a CLI coding-assistant confirmation dialog
-(Claude Code's 'Allow this bash command?' prompt, or Codex CLI's 'Yes / No, and tell Codex what to do differently' prompt).
+SYSTEM_PROMPT = """You classify text scraped from a coding-assistant confirmation dialog
+(Claude Code's 'Allow this bash command?' prompt, Codex CLI's 'Yes / No, and tell Codex what to do differently' prompt, or Codex's VS Code 'Allow once / Deny' card).
 
 The text usually contains:
   - An optional question / title (in any language, e.g. French).

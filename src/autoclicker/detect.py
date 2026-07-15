@@ -25,6 +25,12 @@ CODEX_OPT2_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Codex's VS Code chat UI uses ordinary buttons instead of the numbered
+# terminal menu. Keep these anchored at the beginning so prose mentioning
+# "allow once" or "deny" is not mistaken for an actionable button.
+CODEX_UI_ALLOW_ONCE_RE = re.compile(r"^\s*allow\s*once\b", re.IGNORECASE)
+CODEX_UI_DENY_RE = re.compile(r"^\s*deny\b", re.IGNORECASE)
+
 
 @dataclass
 class Detection:
@@ -291,6 +297,72 @@ def _detect_codex(lines: List[OcrLine], monitor: Monitor) -> Optional[Detection]
     )
 
 
+def _detect_codex_ui(lines: List[OcrLine], monitor: Monitor) -> Optional[Detection]:
+    """Detect Codex's VS Code approval card and its ``Allow once`` button.
+
+    The click coordinates come from the OCR bounding box on every frame, so
+    they follow the window. Requiring a ``Deny`` button to the left on the
+    same row keeps an isolated mention of "Allow once" from being clicked.
+    """
+    allow_lines = [
+        ln for ln in lines if CODEX_UI_ALLOW_ONCE_RE.match(ln.text.strip())
+    ]
+    if not allow_lines:
+        return None
+
+    # The lowest matching card is the current prompt when an older approval
+    # remains visible higher in the conversation.
+    for allow_line in sorted(allow_lines, key=lambda ln: ln.top, reverse=True):
+        allow_h = max(1, allow_line.bottom - allow_line.top)
+        deny_candidates = []
+        for ln in lines:
+            if not CODEX_UI_DENY_RE.match(ln.text.strip()):
+                continue
+            deny_h = max(1, ln.bottom - ln.top)
+            same_row_tolerance = max(8, 2 * max(allow_h, deny_h))
+            if ln.center_x >= allow_line.center_x:
+                continue
+            if abs(ln.center_y - allow_line.center_y) > same_row_tolerance:
+                continue
+            deny_candidates.append(ln)
+
+        if not deny_candidates:
+            continue
+        deny_line = min(
+            deny_candidates,
+            key=lambda ln: (
+                abs(ln.center_y - allow_line.center_y),
+                abs(allow_line.left - ln.right),
+            ),
+        )
+
+        row_top = min(allow_line.top, deny_line.top)
+        line_h = max(allow_h, deny_line.bottom - deny_line.top, 1)
+        cutoff = row_top - line_h * 25
+        above = [
+            ln for ln in lines
+            if ln.bottom <= row_top and ln.bottom >= cutoff and ln.text.strip()
+        ]
+        if not above:
+            continue
+        above.sort(key=lambda ln: (ln.top, ln.left))
+        command_text = "\n".join(ln.text.strip() for ln in above)
+
+        return Detection(
+            monitor=monitor,
+            command_text=command_text,
+            yes_click_x=allow_line.center_x + monitor.left,
+            yes_click_y=allow_line.center_y + monitor.top,
+            header=above[0],
+            yes=allow_line,
+            no=deny_line,
+            source="codex-ui",
+            yes_source="ocr",
+        )
+
+    return None
+
+
 def detect_prompt(lines: List[OcrLine], monitor: Monitor, image=None) -> Optional[Detection]:
     # When the "Allow this command" header is present, Claude wins outright.
     # Otherwise prefer Codex's "tell Codex" anchor (so its prompts keep their
@@ -298,6 +370,9 @@ def detect_prompt(lines: List[OcrLine], monitor: Monitor, image=None) -> Optiona
     # this is what catches edit / "Do you want to proceed?" prompts and the
     # common case where OCR drops the header line. ``image`` (the region frame)
     # lets Claude detection locate the Yes option by its blue highlight bar.
+    codex_ui = _detect_codex_ui(lines, monitor)
+    if codex_ui is not None:
+        return codex_ui
     if any(CLAUDE_HEADER_RE.search(ln.text) for ln in lines):
         claude = _detect_claude(lines, monitor, image)
         if claude is not None:

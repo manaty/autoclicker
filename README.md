@@ -6,7 +6,7 @@ Desktop watcher that auto-approves Claude Code's `Allow this bash command?` prom
 
 1. Every 5 s (configurable), captures each monitored **region** (or full screens if none configured).
 2. Runs OCR (RapidOCR — pure ONNX, no Tesseract needed).
-3. Detects the Claude Code prompt by looking for the `Allow this bash command?` header together with `1 Yes` / `2-9 No` option lines. Frames without all markers are ignored.
+3. Detects Claude/Codex terminal confirmation menus and Codex's VS Code `Deny` / `Allow once` approval cards. Frames without a complete prompt signature are ignored.
 4. Extracts the command text between the header and the options.
 5. Sends it to OpenAI `gpt-5.4-nano-2026-03-17` with a Structured-Outputs schema asking for `{safe, category, reason}`.
 6. If the verdict is `safe: true` **and** the app is armed, moves the mouse to the Yes button's pixel coords and clicks. Otherwise logs the decision.
