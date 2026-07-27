@@ -28,8 +28,10 @@ CODEX_OPT2_RE = re.compile(
 # Codex's VS Code chat UI uses ordinary buttons instead of the numbered
 # terminal menu. Keep these anchored at the beginning so prose mentioning
 # "allow once" or "deny" is not mistaken for an actionable button.
-CODEX_UI_ALLOW_ONCE_RE = re.compile(r"^\s*allow\s*once\b", re.IGNORECASE)
-CODEX_UI_DENY_RE = re.compile(r"^\s*deny\b", re.IGNORECASE)
+CODEX_UI_ALLOW_ONCE_RE = re.compile(
+    r"^\s*allow\s*once(?=\b|\d)", re.IGNORECASE
+)
+CODEX_UI_DENY_RE = re.compile(r"^\s*deny(?=\b|\d)", re.IGNORECASE)
 
 
 @dataclass
