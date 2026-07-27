@@ -360,6 +360,27 @@ def test_detects_codex_ui_when_ocr_merges_allow_once():
     assert (det.yes_click_x, det.yes_click_y) == (504, 156)
 
 
+def test_detects_three_button_card_when_ocr_merges_shortcut_numbers():
+    # The keyboard shortcut badges can be glued to both button labels:
+    # "Deny1", "Always allow2", and "Allowonce3 Ctrl+Enter".
+    lines = [
+        _line("Allow Claude to run Get the ingress IP and TLS issuers?", top=50),
+        _line("kubectl get ingress -A", top=90),
+        _line("Deny1", top=148, left=35, w=58, h=18),
+        _line("Always allow2", top=148, left=504, w=106, h=18),
+        _line("Allowonce3 Ctrl+Enter", top=148, left=618, w=161, h=18),
+    ]
+
+    det = detect_prompt(lines, MON)
+
+    assert det is not None
+    assert det.source == "codex-ui"
+    assert det.no.text == "Deny1"
+    assert det.yes.text == "Allowonce3 Ctrl+Enter"
+    assert (det.yes_click_x, det.yes_click_y) == (698, 157)
+    assert "kubectl get ingress -A" in det.command_text
+
+
 def test_ignores_allow_once_without_deny_button():
     lines = [
         _line("Documentation: choose Allow once to continue", top=50),
